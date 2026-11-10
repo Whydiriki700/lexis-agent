@@ -50,7 +50,7 @@ Doctor is read-only. It checks your Python, your configuration folder,
 your terminal, and the core dependencies, and explains in plain language
 anything that needs attention. It never changes, moves, or deletes a file.
 
-## Coming from the earlier prototype (C:\Lexis Agent)
+## Coming from the earlier prototype
 
 Migration is explicit, never silent. `lexis doctor` will tell you it found
 the earlier prototype; nothing is copied or changed until a separate
