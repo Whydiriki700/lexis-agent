@@ -12,8 +12,9 @@ import platform
 import sys
 
 import lexis
+from lexis.cortex import bridge
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = bridge.find_home()
 
 
 def _check(label, ok, detail=""):

@@ -39,9 +39,7 @@ from lexis.cortex.warden import MODES, Warden
 from lexis.visor import panels
 from lexis.visor.banner import AMBER, EMBER, banner_text
 
-ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
+ROOT = bridge.find_home()
 GREEN = "#3fb96f"
 RED = "#e05c5c"
 TXT = "#e8ded2"

@@ -174,6 +174,53 @@ class TestDocuments(unittest.TestCase):
             led.close()
 
 
+class TestFindHome(unittest.TestCase):
+    def setUp(self):
+        import shutil
+
+        from lexis.cortex import bridge
+
+        self.bridge = bridge
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.old_cwd = os.getcwd()
+        self.addCleanup(os.chdir, self.old_cwd)
+        self.old_override = os.environ.pop("LEXIS_HOME", None)
+        self.addCleanup(self._restore_override)
+
+    def _restore_override(self):
+        if self.old_override is not None:
+            os.environ["LEXIS_HOME"] = self.old_override
+
+    def test_override_wins(self):
+        os.environ["LEXIS_HOME"] = self.tmp
+        self.assertEqual(self.bridge.find_home(), self.tmp)
+
+    def test_cwd_with_config_wins(self):
+        os.makedirs(os.path.join(self.tmp, "config"))
+        os.chdir(self.tmp)
+        self.assertEqual(self.bridge.find_home(), self.tmp)
+
+    def test_source_tree_fallback(self):
+        bare = os.path.join(self.tmp, "bare")
+        os.makedirs(bare)
+        os.chdir(bare)
+        tree = os.path.join(self.tmp, "tree")
+        fake_file = os.path.join(tree, "lexis", "cortex", "bridge.py")
+        os.makedirs(os.path.dirname(fake_file))
+        os.makedirs(os.path.join(tree, "config"))
+        self.assertEqual(self.bridge.find_home(fake_file), tree)
+
+    def test_plain_cwd_fallback(self):
+        bare = os.path.join(self.tmp, "bare2")
+        os.makedirs(bare)
+        os.chdir(bare)
+        tree = os.path.join(self.tmp, "installed")
+        fake_file = os.path.join(tree, "lexis", "cortex", "bridge.py")
+        os.makedirs(os.path.dirname(fake_file))
+        self.assertEqual(self.bridge.find_home(fake_file), bare)
+
+
 class TestPulseFakeStream(unittest.TestCase):
     def test_turns(self):
         from lexis.cortex import bridge

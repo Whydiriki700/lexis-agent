@@ -17,6 +17,32 @@ KEY_ENV = "DEEPSEEK_API_KEY"
 BASE_ENV = "DEEPSEEK_BASE_URL"
 
 
+def find_home(module_file: str = __file__) -> str:
+    """Resolve the Lexis home folder (where .env, config and data live).
+
+    The package can run from a source checkout or from an installed
+    copy (site-packages), so the home cannot be derived from the
+    module path alone. Order: the LEXIS_HOME override; the current
+    folder when it is a Lexis home (holds config/ or .env); the
+    source tree when running from a checkout; otherwise the current
+    folder, where first-run setup creates what it needs.
+    """
+    override = os.getenv("LEXIS_HOME", "").strip()
+    if override:
+        return override
+    cwd = os.getcwd()
+    if os.path.isdir(os.path.join(cwd, "config")) or os.path.exists(
+        os.path.join(cwd, ".env")
+    ):
+        return cwd
+    tree = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(module_file)))
+    )
+    if os.path.isdir(os.path.join(tree, "config")):
+        return tree
+    return cwd
+
+
 def load_env(root: str) -> None:
     load_dotenv(os.path.join(root, ".env"))
 

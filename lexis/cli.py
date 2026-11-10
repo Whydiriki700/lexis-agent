@@ -22,7 +22,7 @@ from lexis.cortex.pulse import Pulse
 from lexis.cortex.vault import Vault
 from lexis.cortex.warden import Warden
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = bridge.find_home()
 
 
 class Spinner:
