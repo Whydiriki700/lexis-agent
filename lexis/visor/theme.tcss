@@ -215,6 +215,11 @@ BootScreen Vertical {
     margin-top: 1;
 }
 
+.attach {
+    height: 1;
+    margin-left: 2;
+}
+
 #slashmenu {
     display: none;
     border: solid $line2;

@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 
-from lexis.cortex import bridge
+from lexis.cortex import attachments, bridge
 from lexis.cortex.compass import MODELS, Compass
 from lexis.cortex.forge import Forge
 from lexis.cortex.ledger import Ledger
@@ -236,9 +236,12 @@ def run_chat(argv) -> int:
                     print("Tidak ada file yang diubah selama menyusun "
                           "rencana. Ketik /plan run untuk menjalankan.\n")
                 continue
+            atts = attachments.scan(user_input)
+            for att in atts:
+                print(att.card_text())
             spinner.start()
             try:
-                pulse.handle_turn(user_input)
+                pulse.handle_turn(attachments.enrich(user_input, atts))
             finally:
                 spinner.stop()
         except KeyboardInterrupt:

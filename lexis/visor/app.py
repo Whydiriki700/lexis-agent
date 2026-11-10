@@ -29,7 +29,7 @@ from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, OptionList, ProgressBar, Static, TextArea
 from textual.widgets.option_list import Option
 
-from lexis.cortex import bridge
+from lexis.cortex import attachments, bridge
 from lexis.cortex.compass import MODELS, Compass
 from lexis.cortex.forge import Forge
 from lexis.cortex.ledger import Ledger
@@ -1058,13 +1058,22 @@ class LexisVisor(App):
         self.query_one("#writebar", ProgressBar).remove_class("on")
         self.query_one("#livecode", Static).remove_class("on")
         self._post_chat("YOU", text)
+        # Dropped files: detection is stat-only and content reads
+        # are budget-capped, so this never stalls the interface;
+        # the cards land instantly, the model gets the content.
+        atts = attachments.scan(text)
+        for att in atts:
+            self._post(Static(
+                Text(att.card_text(), style=f"bold {AMBER}"),
+                classes="attach",
+            ))
         self.plan_steps = [("now", "Reply from the model")]
         self._turn_writes = []
         self._begin_stream()
         self.query_one("#typing", Static).add_class("on")
         self._refresh_all()
         self.run_worker(
-            lambda: self._turn_worker(text),
+            lambda: self._turn_worker(attachments.enrich(text, atts)),
             thread=True, group="turn", exclusive=False,
         )
 
