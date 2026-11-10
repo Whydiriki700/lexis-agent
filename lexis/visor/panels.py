@@ -153,6 +153,110 @@ MODE_LINES = {
 }
 
 
+def _fmt_tokens(n: int) -> str:
+    if n >= 1000:
+        return f"~{n / 1000:.1f}K"
+    return f"~{n}"
+
+
+def tokens_text(ledger, session_id, live_out_chars: int = 0,
+                busy: bool = False) -> Text:
+    """The realtime token dashboard (Master, 2026-11-10). The
+    streaming-out counter moves while the model writes; the rest
+    are this session's ledger cost rows. Every figure is the
+    ledger's own 4-chars-per-token estimate, marked with ~."""
+    in_total = out_total = 0
+    last_in = last_out = None
+    if ledger is not None and session_id is not None:
+        import json
+
+        rows = ledger._conn.execute(
+            "SELECT detail FROM events WHERE session_id = ? "
+            "AND kind = 'cost' ORDER BY id",
+            (session_id,),
+        ).fetchall()
+        for (detail,) in rows:
+            try:
+                d = json.loads(detail)
+            except ValueError:
+                continue
+            last_in = int(d.get("prompt_tokens_est", 0))
+            last_out = int(d.get("reply_tokens_est", 0))
+            in_total += last_in
+            out_total += last_out
+    out = Text()
+    out.append("TOKENS", style=f"bold {DIM}")
+    out.append("   live · estimates", style=FAINT)
+    _kv(out, "Streaming out",
+        _fmt_tokens(live_out_chars // 4) if busy else "—")
+    _kv(out, "Last turn in",
+        _fmt_tokens(last_in) if last_in is not None else "—")
+    _kv(out, "Last turn out",
+        _fmt_tokens(last_out) if last_out is not None else "—")
+    _kv(out, "Session in", _fmt_tokens(in_total) if in_total else "—")
+    _kv(out, "Session out",
+        _fmt_tokens(out_total) if out_total else "—")
+    _kv(out, "Session total",
+        _fmt_tokens(in_total + out_total)
+        if (in_total + out_total) else "—")
+    return out
+
+
+def _ctx_bar(pct: int, cells: int = 10) -> str:
+    filled = max(0, min(cells, round(pct * cells / 100)))
+    return "▓" * filled + "░" * (cells - filled)
+
+
+def status_text(*, model, provider, mode, mode_icon, conn, state_icon,
+                state_label, turn_in, turn_out, live, sess_total,
+                ctx_pct, turn_secs, queued) -> Text:
+    """The fixed status strip (Master, 2026-11-10): two lines that
+    update in place and never print into the chat flow. Every value
+    is live app state; token figures carry the ~ estimate mark."""
+    out = Text(overflow="crop")
+    out.append("Model ", style=DIM)
+    out.append(str(model), style=f"bold {TXT}")
+    out.append(" · Provider ", style=DIM)
+    out.append(str(provider), style=f"bold {TXT}")
+    out.append(" · ", style=DIM)
+    out.append(f"{mode_icon} {mode}", style=f"bold {AMBER}")
+    out.append(" · Link ", style=DIM)
+    if conn == "linked":
+        out.append("● linked", style=GREEN)
+    elif conn == "error":
+        out.append("● link error", style=RED)
+    else:
+        out.append("○ standby", style=FAINT)
+    out.append(" · ", style=DIM)
+    out.append(f"{state_icon} {state_label}", style=f"bold {EMBER}")
+    out.append("\n")
+    out.append("Turn ", style=DIM)
+    if live:
+        out.append(f"out {_fmt_tokens(turn_out)} live", style=TXT)
+    elif turn_in is not None:
+        out.append(
+            f"in {_fmt_tokens(turn_in)} · out "
+            f"{_fmt_tokens(turn_out or 0)}",
+            style=TXT,
+        )
+    else:
+        out.append("—", style=TXT)
+    out.append(" · Session cost ", style=DIM)
+    out.append(_fmt_tokens(sess_total) + " tokens" if sess_total else "—",
+               style=TXT)
+    out.append(" · Context ", style=DIM)
+    out.append(f"{ctx_pct}% ", style=TXT)
+    out.append(_ctx_bar(ctx_pct), style=EMBER)
+    out.append(" · Turn time ", style=DIM)
+    out.append(f"{turn_secs:.1f} s" if turn_secs is not None else "—",
+               style=f"bold {TXT}")
+    if queued:
+        out.append(" · Queued ", style=DIM)
+        out.append(str(queued), style=f"bold {AMBER}")
+    out.append(" · Autosaved · resumable anytime", style=DIM)
+    return out
+
+
 def mode_text(mode: str) -> Text:
     """The compliance ladder, shown permanently in the rail."""
     out = Text()

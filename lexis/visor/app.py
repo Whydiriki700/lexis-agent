@@ -37,7 +37,14 @@ from lexis.cortex.pulse import Pulse
 from lexis.cortex.vault import Vault
 from lexis.cortex.warden import MODES, Warden
 from lexis.visor import panels
-from lexis.visor.banner import AMBER, EMBER, banner_text
+from lexis.visor.icons import brain_fire_text, skull_fire_text
+from lexis.visor.banner import (
+    AMBER,
+    ART_WIDTH,
+    EMBER,
+    banner_compact_text,
+    banner_text,
+)
 
 ROOT = bridge.find_home()
 GREEN = "#3fb96f"
@@ -55,6 +62,7 @@ HINTS = (
 
 PALETTE_COMMANDS = [
     ("/model", "switch model or the Auto profile", "Ctrl+M"),
+    ("/provider", "switch provider or add a new endpoint + key", "—"),
     ("/skills", "manage skills: install from GitHub, create new, disable", "—"),
     ("/mode", "switch compliance mode: EMBER · BLAZE · INFERNO", "Ctrl+."),
     ("/plan", "plan first, act after approval", "Ctrl+P"),
@@ -157,10 +165,55 @@ def diff_text(old: str, new: str) -> Text:
     return out
 
 
+def separator_text(label: str, sub: str = "") -> Text:
+    """The Lexis turn separator (Master, 2026-11-10): deliberately
+    stronger than a plain rule. A short ember bar burns bright, a
+    diamond marks the turn, the speaker label follows, and the rest
+    of the line fades to dark. Used between chat turns, over the
+    typing indicator, and over the live coding panel."""
+    t = Text(overflow="crop")
+    t.append("━━━", style=f"bold {EMBER}")
+    t.append(" ◆ ", style=f"bold {AMBER}")
+    t.append(label, style=f"bold {EMBER if label != 'YOU' else AMBER}")
+    if sub:
+        t.append(f"  {sub}", style=FAINT)
+    t.append("  " + "─" * 120, style="#4a3826")
+    return t
+
+
 class Composer(TextArea):
     """Enter sends, Shift+Enter makes a new line (mockup contract)."""
 
     def _on_key(self, event) -> None:
+        active = getattr(self.app, "slash_menu_active", None)
+        if active is not None and active():
+            if event.key == "down":
+                event.prevent_default()
+                event.stop()
+                self.app.slash_move(1)
+                return
+            if event.key == "up":
+                event.prevent_default()
+                event.stop()
+                self.app.slash_move(-1)
+                return
+            if event.key == "tab":
+                event.prevent_default()
+                event.stop()
+                self.app.slash_complete()
+                return
+            if event.key == "escape":
+                event.prevent_default()
+                event.stop()
+                self.app.slash_dismiss()
+                return
+            if event.key == "enter":
+                selected = self.app.slash_selected()
+                if selected and self.text.strip() != selected:
+                    event.prevent_default()
+                    event.stop()
+                    self.app.slash_complete()
+                    return
         if event.key == "enter":
             event.prevent_default()
             event.stop()
@@ -239,6 +292,7 @@ class PaletteScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="modalbox"):
+            yield Static(separator_text("COMMANDS", "palette"))
             yield Input(
                 placeholder="Search commands, sessions, skills, files",
                 id="pal-q",
@@ -306,6 +360,56 @@ class PickScreen(ModalScreen):
         self, event: OptionList.OptionSelected
     ) -> None:
         self.dismiss(event.option.id)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class ProviderScreen(ModalScreen):
+    """Add a provider from inside the app (Master, 2026-11-10):
+    name, base URL, and API key typed here, never in a file the
+    owner must edit first. The key field is masked; the key itself
+    is stored only in the profile .env by bridge.add_provider and
+    is never shown anywhere."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modalbox"):
+            yield Static(separator_text("PROVIDER", "add new"))
+            yield Input(placeholder="Name, e.g. My Gateway", id="pv-name")
+            yield Input(
+                placeholder="Base URL, e.g. https://api.example.com/v1",
+                id="pv-base",
+            )
+            yield Input(
+                placeholder="API key (stored in .env, never shown)",
+                id="pv-key", password=True,
+            )
+            yield Static(
+                Text(
+                    "Unlimited providers, any OpenAI-compatible "
+                    "endpoint. The key is written only to this "
+                    "profile's .env file.",
+                    style=FAINT,
+                )
+            )
+            with Horizontal():
+                yield Button(
+                    "Save provider", id="pv-save", variant="primary"
+                )
+                yield Button("Cancel", id="pv-cancel")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id != "pv-save":
+            self.dismiss(None)
+            return
+        name = self.query_one("#pv-name", Input).value.strip()
+        base = self.query_one("#pv-base", Input).value.strip()
+        key = self.query_one("#pv-key", Input).value.strip()
+        if not name or not base:
+            return  # both are required; stay open
+        self.dismiss((name, base, key))
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -384,6 +488,7 @@ class InfernoScreen(ModalScreen):
             style=TXT,
         )
         with Vertical(classes="modalbox"):
+            yield Static(skull_fire_text())
             yield Static(title)
             yield Static(body)
             with Horizontal():
@@ -407,7 +512,7 @@ class ToolCard(Static):
         self.set_running()
 
     def set_running(self, note: str = "running…") -> None:
-        t = Text()
+        t = Text(no_wrap=True, overflow="ellipsis")
         t.append("◌ ", style=EMBER)
         t.append(self.title, style=f"bold {TXT}")
         t.append(f"   {note}", style=FAINT)
@@ -416,7 +521,7 @@ class ToolCard(Static):
     def set_waiting(self) -> None:
         self.remove_class("run")
         self.add_class("wait")
-        t = Text()
+        t = Text(no_wrap=True, overflow="ellipsis")
         t.append("! ", style=AMBER)
         t.append(self.title, style=f"bold {TXT}")
         t.append("   waiting for your decision", style=FAINT)
@@ -425,10 +530,22 @@ class ToolCard(Static):
     def set_done(self, ok: bool, detail: str, duration: float) -> None:
         self.remove_class("run", "wait")
         self.add_class("ok" if ok else "run")
-        t = Text()
+        # The duration sits at the card's right edge (Master,
+        # 2026-11-10: one neat grid, durations right-aligned);
+        # long titles and details cut with an ellipsis instead of
+        # wrapping ragged.
+        head = ("✓ " if ok else "✗ ") + self.title
+        dur = f"{duration:.1f} s"
+        try:
+            width = self.content_region.width or 80
+        except Exception:
+            width = 80
+        pad = max(2, width - len(head) - len(dur))
+        t = Text(no_wrap=True, overflow="ellipsis")
         t.append("✓ " if ok else "✗ ", style=GREEN if ok else RED)
         t.append(self.title, style=f"bold {TXT}")
-        t.append(f"   {duration:.1f} s", style=FAINT)
+        t.append(" " * pad, style=FAINT)
+        t.append(dur, style=FAINT)
         if detail:
             t.append(f"\n{detail}", style=DIM)
         self.update(t)
@@ -444,7 +561,9 @@ class BootScreen(Screen):
     happened, presented in order. Skipped entirely under reduced
     motion and in headless test runs."""
 
-    def __init__(self, banner: Text, stages, interval: float = 0.09):
+    def __init__(self, banner: Text, stages, interval: float = 0.40):
+        # 15 ticks (10 banner lines + 5 stages) at 0.40 s is a ~6 s
+        # opening; Master set the floor at 5-7 s on 2026-11-10.
         super().__init__()
         self._banner = banner
         plain = banner.plain
@@ -463,6 +582,7 @@ class BootScreen(Screen):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(id="boot-banner")
+            yield Static(brain_fire_text(), id="boot-emblem")
             yield Static(id="boot-stages")
             yield ProgressBar(
                 id="boot-bar",
@@ -554,12 +674,23 @@ class LexisVisor(App):
         self._turn_writes = []
         self._plan_flow = False
         self._stream_buf = ""
+        self._last_live_tok = 0
+        self._conn = "standby"
+        self._streaming = False
+        self._awaiting = False
+        self._turn_error = False
+        self._turn_started = None
+        self._cost_cache = (0, 0, None, None)
         self._stream_widget = None
         self._cards = {}
         self._approval_data = None
         self._approval_event = None
         self._approval_result = "reject"
         self._typing_frame = 0
+        self._banner_wide = True
+        self._slash_items = []
+        self._slash_sel = 0
+        self._slash_dismissed_for = None
         self._live = None  # {path, content, revealed, total}
         self._live_timer = None
         self._resumed = False
@@ -612,14 +743,26 @@ class LexisVisor(App):
             self._render_history()
         self._refresh_all()
         self._typing_timer = self.set_interval(0.35, self._tick_typing)
+        # A short repeating check keeps the banner matched to the
+        # window: it catches the first real layout and every later
+        # resize without depending on event timing.
+        self.set_interval(0.3, self._apply_banner)
         if self.reduced_motion or self.is_headless:
             self.query_one("#composer", Composer).focus()
         else:
+            boot_banner = (
+                banner_text()
+                if self.size.width - 48 >= ART_WIDTH
+                else banner_compact_text()
+            )
+
+            def _after_boot(_r):
+                self._apply_banner()
+                self.query_one("#composer", Composer).focus()
+
             self.push_screen(
-                BootScreen(banner_text(), self._boot_stages()),
-                callback=lambda _r: self.query_one(
-                    "#composer", Composer
-                ).focus(),
+                BootScreen(boot_banner, self._boot_stages()),
+                callback=_after_boot,
             )
 
     def _boot_stages(self):
@@ -638,7 +781,7 @@ class LexisVisor(App):
         with Horizontal(id="body"):
             with Vertical(id="main"):
                 with Vertical(id="bannerbox"):
-                    yield Static(banner_text())
+                    yield Static(banner_text(), id="banner")
                     yield Static(id="welcome")
                 yield VerticalScroll(id="chat")
                 yield Static(id="livecode")
@@ -647,7 +790,7 @@ class LexisVisor(App):
                     show_percentage=False,
                 )
                 yield Static(id="typing")
-            with Vertical(id="rail"):
+            with VerticalScroll(id="rail"):
                 yield Static(classes="pnl", id="pnl-plan")
                 with Vertical(classes="pnl"):
                     yield Static(id="pnl-context")
@@ -655,12 +798,15 @@ class LexisVisor(App):
                         id="ctxbar", total=100, show_eta=False,
                         show_percentage=False,
                     )
+                yield Static(classes="pnl", id="pnl-tokens")
                 yield Static(classes="pnl", id="pnl-memory")
                 yield Static(classes="pnl", id="pnl-skills")
                 yield Static(classes="pnl", id="pnl-mode")
         yield Static(id="status")
-        yield Composer(id="composer")
-        yield Static(HINTS, id="hints")
+        yield Static(id="slashmenu")
+        with Vertical(id="composerbox"):
+            yield Composer(id="composer")
+            yield Static(HINTS, id="hints")
 
     def on_unmount(self) -> None:
         timer = getattr(self, "_typing_timer", None)
@@ -682,7 +828,31 @@ class LexisVisor(App):
         chat.mount(widget)
         chat.scroll_end(animate=False)
 
+    # ---------- responsive banner ----------
+
+    def _apply_banner(self) -> None:
+        """The wide art needs ART_WIDTH columns of chat width; below
+        that it would wrap and scramble, so the compact banner takes
+        over (Master's small-window report, 2026-11-10)."""
+        try:
+            w = self.query_one("#bannerbox").content_region.width
+        except Exception:
+            return
+        if not w:
+            return
+        wide = w >= ART_WIDTH + 2
+        if wide != self._banner_wide:
+            self._banner_wide = wide
+            self.query_one("#banner", Static).update(
+                banner_text() if wide else banner_compact_text()
+            )
+
+    def on_resize(self, event) -> None:
+        self._apply_banner()
+
     def _post_chat(self, who: str, body: str) -> None:
+        if who == "YOU":
+            self._post(Static(separator_text("YOU"), classes="sep"))
         t = Text()
         t.append(
             who + "\n",
@@ -705,61 +875,48 @@ class LexisVisor(App):
                 self._post_chat("LEXIS", m["content"])
 
     def _refresh_all(self) -> None:
-        hdr = Text()
-        hdr.append("LEXIS ", style=f"bold {EMBER}")
+        mode_icon = {
+            "EMBER": "🔥", "BLAZE": "⚡", "INFERNO": "💀",
+        }.get(self.warden.mode, "🔥")
+        hdr = Text(overflow="crop")
+        hdr.append("🔥 LEXIS ", style=f"bold {EMBER}")
         hdr.append("AGENT", style=f"bold {AMBER}")
         hdr.append(".   ", style=f"bold {EMBER}")
-        hdr.append("Brain ", style=DIM)
+        hdr.append("🧠 Brain ", style=DIM)
         hdr.append("Lexis Cortex", style=f"bold {TXT}")
-        hdr.append(" · Model ", style=DIM)
+        hdr.append(" · ◆ Model ", style=DIM)
         hdr.append("Auto" if self.compass.auto else self.compass.current,
                    style=TXT)
-        hdr.append(" · Provider ", style=DIM)
-        hdr.append("Osvyn", style=f"bold {TXT}")
-        hdr.append(" · Compliance ", style=DIM)
+        hdr.append(" · ● Provider ", style=DIM)
+        hdr.append(bridge.provider_name(self.root), style=f"bold {TXT}")
+        hdr.append(f" · {mode_icon} Compliance ", style=DIM)
         hdr.append(
             self.warden.mode,
             style=f"bold {RED if self.warden.mode == 'INFERNO' else AMBER}",
         )
         self.query_one("#hdr", Static).update(hdr)
 
-        st = Text()
-        st.append("Model ", style=DIM)
-        st.append("Auto" if self.compass.auto else self.compass.current,
-                  style=f"bold {TXT}")
-        st.append(" · Backup ", style=DIM)
-        st.append(self.compass.backup_name() or "—", style=TXT)
-        st.append(" · Session cost ", style=DIM)
-        tokens = 0
+        self._status_mode_icon = mode_icon
         if hasattr(self, "ledger") and self.session_id is not None:
             import json as _json
 
+            tot_in = tot_out = 0
+            last_in = last_out = None
             for (detail,) in self.ledger._conn.execute(
                 "SELECT detail FROM events WHERE session_id = ? "
-                "AND kind = 'cost'",
+                "AND kind = 'cost' ORDER BY id",
                 (self.session_id,),
             ).fetchall():
                 try:
                     d = _json.loads(detail)
-                    tokens += int(d.get("prompt_tokens_est", 0)) + int(
-                        d.get("reply_tokens_est", 0)
-                    )
                 except ValueError:
-                    pass
-        st.append(f"~{tokens / 1000:.1f}K tokens" if tokens else "—",
-                  style=TXT)
-        st.append(" · Turn time ", style=DIM)
-        st.append(
-            f"{self.last_turn_time:.1f} s"
-            if self.last_turn_time is not None
-            else "—",
-            style=f"bold {TXT}",
-        )
-        if self.queue:
-            st.append(" · Queued ", style=DIM)
-            st.append(str(len(self.queue)), style=f"bold {AMBER}")
-        st.append(" · Autosaved · resumable anytime", style=DIM)
-        self.query_one("#status", Static).update(st)
+                    continue
+                last_in = int(d.get("prompt_tokens_est", 0))
+                last_out = int(d.get("reply_tokens_est", 0))
+                tot_in += last_in
+                tot_out += last_out
+            self._cost_cache = (tot_in, tot_out, last_in, last_out)
+        self._refresh_status()
 
         self.query_one("#pnl-plan", Static).update(
             panels.plan_text(self.plan_steps)
@@ -771,6 +928,13 @@ class LexisVisor(App):
         self.query_one("#ctxbar", ProgressBar).update(
             progress=panels.context_percent(msgs)
         )
+        self.query_one("#pnl-tokens", Static).update(
+            panels.tokens_text(
+                self.ledger, self.session_id,
+                live_out_chars=len(self._stream_buf) if self.busy else 0,
+                busy=self.busy,
+            )
+        )
         self.query_one("#pnl-memory", Static).update(
             panels.memory_text(self.ledger, self.session_id, self.documents)
         )
@@ -780,6 +944,48 @@ class LexisVisor(App):
         self.query_one("#pnl-mode", Static).update(
             panels.mode_text(self.warden.mode)
         )
+
+    # ---------- status strip ----------
+
+    def _work_state(self):
+        """The flame-language work state (Master, 2026-11-10): the
+        strip says what the fire is doing, in place."""
+        if not self.busy:
+            return "◦", "Ember low · idle"
+        if self._awaiting:
+            return "◆", "Held flame · awaiting your word"
+        if self._streaming:
+            return "🔥", "Flame · typing"
+        return "🔥", "Ablaze · working"
+
+    def _refresh_status(self) -> None:
+        try:
+            status_w = self.query_one("#status", Static)
+        except Exception:
+            return  # not mounted yet / tearing down
+        tot_in, tot_out, last_in, last_out = self._cost_cache
+        if self.busy and self._turn_started is not None:
+            turn_secs = time.time() - self._turn_started
+        else:
+            turn_secs = self.last_turn_time
+        s_icon, s_label = self._work_state()
+        status_w.update(panels.status_text(
+            model="Auto" if self.compass.auto else self.compass.current,
+            provider=bridge.provider_name(self.root),
+            mode=self.warden.mode,
+            mode_icon=getattr(self, "_status_mode_icon", "🔥"),
+            conn=self._conn,
+            state_icon=s_icon,
+            state_label=s_label,
+            turn_in=last_in,
+            turn_out=(len(self._stream_buf) // 4 if self.busy
+                      else (last_out or 0)),
+            live=self.busy,
+            sess_total=tot_in + tot_out,
+            ctx_pct=panels.context_percent(self.vault.messages()),
+            turn_secs=turn_secs,
+            queued=len(self.queue),
+        ))
 
     # ---------- composer / queue ----------
 
@@ -828,19 +1034,33 @@ class LexisVisor(App):
 
     # ---------- turn engine ----------
 
+    def _begin_stream(self, sub: str = "") -> None:
+        """Open a Lexis reply: its separator bar first, then the
+        stream widget the tokens land in."""
+        self._post(Static(separator_text("LEXIS", sub), classes="sep"))
+        self._stream_buf = ""
+        self._last_live_tok = 0
+        body = Text()
+        body.append("LEXIS\n", style=f"bold {FAINT}")
+        self._stream_widget = Static(body, classes="msg")
+        self._post(self._stream_widget)
+
+    def _arm_turn_state(self) -> None:
+        self._turn_started = time.time()
+        self._turn_error = False
+        self._streaming = False
+        self._awaiting = False
+
     def _start_turn(self, text: str) -> None:
         self.busy = True
+        self._arm_turn_state()
         self.stop_event.clear()
         self.query_one("#writebar", ProgressBar).remove_class("on")
         self.query_one("#livecode", Static).remove_class("on")
         self._post_chat("YOU", text)
         self.plan_steps = [("now", "Reply from the model")]
         self._turn_writes = []
-        self._stream_buf = ""
-        body = Text()
-        body.append("LEXIS\n", style=f"bold {FAINT}")
-        self._stream_widget = Static(body, classes="msg")
-        self._post(self._stream_widget)
+        self._begin_stream()
         self.query_one("#typing", Static).add_class("on")
         self._refresh_all()
         self.run_worker(
@@ -852,22 +1072,20 @@ class LexisVisor(App):
         try:
             self.pulse.handle_turn(text)
         except Exception as e:  # surface like the plain CLI does
+            self._turn_error = True
             self.call_from_thread(self._post_note, f"Error: {e}")
         finally:
             self.call_from_thread(self._turn_finished)
 
     def _start_plan_draft(self, goal: str) -> None:
         self.busy = True
+        self._arm_turn_state()
         self.stop_event.clear()
         self._plan_flow = True
         self._turn_writes = []
         self._post_chat("YOU", f"/plan {goal}")
         self.plan_steps = [("now", "Draft the plan")]
-        self._stream_buf = ""
-        body = Text()
-        body.append("LEXIS\n", style=f"bold {FAINT}")
-        self._stream_widget = Static(body, classes="msg")
-        self._post(self._stream_widget)
+        self._begin_stream("planning")
         self.query_one("#typing", Static).add_class("on")
         self._refresh_all()
 
@@ -875,6 +1093,7 @@ class LexisVisor(App):
             try:
                 self.pulse.draft_plan(goal)
             except Exception as e:
+                self._turn_error = True
                 self.call_from_thread(self._post_note, f"Error: {e}")
             finally:
                 self.call_from_thread(self._turn_finished)
@@ -883,15 +1102,12 @@ class LexisVisor(App):
 
     def _start_plan_run(self) -> None:
         self.busy = True
+        self._arm_turn_state()
         self.stop_event.clear()
         self._plan_flow = True
         self._turn_writes = []
         self._post_chat("YOU", "/plan run")
-        self._stream_buf = ""
-        body = Text()
-        body.append("LEXIS\n", style=f"bold {FAINT}")
-        self._stream_widget = Static(body, classes="msg")
-        self._post(self._stream_widget)
+        self._begin_stream("running the plan")
         self.query_one("#typing", Static).add_class("on")
         self._refresh_all()
 
@@ -899,6 +1115,7 @@ class LexisVisor(App):
             try:
                 self.pulse.run_plan()
             except Exception as e:
+                self._turn_error = True
                 self.call_from_thread(self._post_note, f"Error: {e}")
             finally:
                 self.call_from_thread(self._turn_finished)
@@ -907,6 +1124,9 @@ class LexisVisor(App):
 
     def _turn_finished(self) -> None:
         self.busy = False
+        self._conn = "error" if self._turn_error else "linked"
+        self._streaming = False
+        self._awaiting = False
         self.last_reply = self._stream_buf
         self.query_one("#typing", Static).remove_class("on")
         if self._live is not None:
@@ -940,10 +1160,23 @@ class LexisVisor(App):
                 t.append(display_text(buf), style=TXT)
                 self._stream_widget.update(t)
                 self._chat().scroll_end(animate=False)
+            est = len(buf) // 4
+            if est != self._last_live_tok:
+                self._last_live_tok = est
+                try:
+                    self.query_one("#pnl-tokens", Static).update(
+                        panels.tokens_text(
+                            self.ledger, self.session_id,
+                            live_out_chars=len(buf), busy=True,
+                        )
+                    )
+                except Exception:
+                    pass
 
         self.call_from_thread(render)
 
     def _cb_first_token(self) -> None:
+        self._streaming = True
         self.call_from_thread(
             lambda: self.query_one("#typing", Static).remove_class("on")
         )
@@ -982,7 +1215,11 @@ class LexisVisor(App):
             )
 
         self.call_from_thread(show)
-        self._approval_event.wait()
+        self._awaiting = True
+        try:
+            self._approval_event.wait()
+        finally:
+            self._awaiting = False
         return self._approval_result
 
     def _cb_event(self, kind: str, data: dict) -> None:
@@ -1144,7 +1381,10 @@ class LexisVisor(App):
         if self._live is None:
             return
         live = self._live
-        head = Text()
+        head = Text(no_wrap=True, overflow="ellipsis")
+        head.append(separator_text(
+            "LIVE CODING", os.path.basename(live["path"])))
+        head.append("\n")
         head.append("● LIVE CODING  ", style=f"bold {AMBER}")
         head.append(os.path.basename(live["path"]), style=f"bold {TXT}")
         head.append(
@@ -1171,20 +1411,107 @@ class LexisVisor(App):
     # ---------- typing indicator ----------
 
     def _tick_typing(self) -> None:
+        if self.busy:
+            self._refresh_status()
         try:
             w = self.query_one("#typing", Static)
         except Exception:
             return  # screen is being torn down
         if not w.has_class("on"):
             return
+        t = separator_text("LEXIS", "typing")
+        t.append("\n")
         if self.reduced_motion:
-            w.update("Lexis is typing...")
+            t.append("Lexis is typing...", style=AMBER)
+            w.update(t)
             return
         self._typing_frame += 1
         f = self._typing_frame
         flames = "🔥" * (1 + f % 3)
         dots = "." * (1 + f % 3)
-        w.update(f"{flames} Lexis is typing{dots}")
+        t.append(f"{flames} Lexis is typing{dots}", style=AMBER)
+        w.update(t)
+
+    # ---------- slash command preview ----------
+
+    def on_text_area_changed(self, event) -> None:
+        if getattr(event.text_area, "id", None) != "composer":
+            return
+        self._slash_update(event.text_area.text)
+
+    def _slash_update(self, text: str) -> None:
+        try:
+            menu = self.query_one("#slashmenu", Static)
+        except Exception:
+            return
+        first = text.split("\n")[0]
+        if (self._slash_dismissed_for is not None
+                and first != self._slash_dismissed_for):
+            self._slash_dismissed_for = None
+        items = []
+        if first.startswith("/") and " " not in first and "\n" not in text:
+            items = [
+                (c, d) for c, d, _k in PALETTE_COMMANDS
+                if c.startswith(first)
+            ]
+        if not items or self._slash_dismissed_for == first:
+            self._slash_items = []
+            menu.remove_class("on")
+            return
+        if items != self._slash_items:
+            self._slash_sel = 0
+        self._slash_items = items
+        self._render_slash_menu()
+        menu.add_class("on")
+
+    def _render_slash_menu(self) -> None:
+        t = Text(overflow="crop")
+        t.append("◆ COMMANDS", style=f"bold {AMBER}")
+        t.append("   up/down choose · Tab complete · Enter run\n",
+                 style=FAINT)
+        for i, (cmd, desc) in enumerate(self._slash_items):
+            mark = "▸ " if i == self._slash_sel else "  "
+            style = f"bold {EMBER}" if i == self._slash_sel else TXT
+            t.append(f"{mark}{cmd}", style=style)
+            t.append(f"   {desc}", style=FAINT)
+            if i < len(self._slash_items) - 1:
+                t.append("\n")
+        self.query_one("#slashmenu", Static).update(t)
+
+    def slash_menu_active(self) -> bool:
+        if not self._slash_items:
+            return False
+        try:
+            return self.query_one("#slashmenu", Static).has_class("on")
+        except Exception:
+            return False
+
+    def slash_selected(self):
+        if not self._slash_items:
+            return None
+        return self._slash_items[self._slash_sel][0]
+
+    def slash_move(self, delta: int) -> None:
+        if not self._slash_items:
+            return
+        self._slash_sel = (
+            (self._slash_sel + delta) % len(self._slash_items)
+        )
+        self._render_slash_menu()
+
+    def slash_complete(self) -> None:
+        cmd = self.slash_selected()
+        if not cmd:
+            return
+        area = self.query_one("#composer", Composer)
+        area.text = cmd + " "
+        area.cursor_location = (0, len(cmd) + 1)
+
+    def slash_dismiss(self) -> None:
+        area = self.query_one("#composer", Composer)
+        self._slash_dismissed_for = area.text.split("\n")[0]
+        self._slash_items = []
+        self.query_one("#slashmenu", Static).remove_class("on")
 
     # ---------- slash commands ----------
 
@@ -1229,6 +1556,72 @@ class LexisVisor(App):
                         "Switch model", ["Auto"] + MODELS,
                         "Auto" if self.compass.auto
                         else self.compass.current,
+                    ),
+                    pick,
+                )
+        elif cmd == "/provider":
+            if arg:
+                if bridge.set_active_provider(self.root, arg):
+                    self.ledger.append_event(
+                        self.session_id, "provider", arg
+                    )
+                    self._post_note(
+                        f"Provider is now {arg}. It applies from "
+                        "the next request, no restart needed. The "
+                        "model list is unchanged: the endpoint must "
+                        "serve the selected model id."
+                    )
+                else:
+                    names = ", ".join(
+                        p["name"]
+                        for p in bridge.list_providers(self.root)
+                    )
+                    self._post_note(
+                        f"No provider named {arg}. Saved: {names}. "
+                        "Type /provider to pick or add one."
+                    )
+                self._refresh_all()
+            else:
+                add_label = "+ Add new provider"
+
+                def added(result):
+                    if result:
+                        name, base, key = result
+                        bridge.add_provider(self.root, name, base, key)
+                        self.ledger.append_event(
+                            self.session_id, "provider", name
+                        )
+                        self._post_note(
+                            f"Provider {name} saved and active. It "
+                            "applies from the next request. The "
+                            "model list is unchanged: the endpoint "
+                            "must serve the selected model id."
+                        )
+                        self._refresh_all()
+
+                def pick(choice):
+                    if not choice:
+                        return
+                    if choice == add_label:
+                        self.push_screen(ProviderScreen(), added)
+                        return
+                    if bridge.set_active_provider(self.root, choice):
+                        self.ledger.append_event(
+                            self.session_id, "provider", choice
+                        )
+                        self._post_note(
+                            f"Provider is now {choice}. It applies "
+                            "from the next request, no restart needed."
+                        )
+                        self._refresh_all()
+
+                names = [
+                    p["name"] for p in bridge.list_providers(self.root)
+                ]
+                self.push_screen(
+                    PickScreen(
+                        "Switch provider", names + [add_label],
+                        bridge.provider_name(self.root),
                     ),
                     pick,
                 )
@@ -1318,10 +1711,11 @@ class LexisVisor(App):
         elif cmd == "/clear":
             self._chat().remove_children()
         elif cmd == "/help":
+            self._post(Static(separator_text("COMMANDS"), classes="sep"))
             lines = "\n".join(
-                f"{c}  {d}" for c, d, _ in PALETTE_COMMANDS
+                f"{c:<9} {d}" for c, d, _ in PALETTE_COMMANDS
             )
-            self._post_note("Commands:\n" + lines)
+            self._post_note(lines)
         else:
             self._post_note(f"Unknown command {cmd}. Type /help for the list.")
         self._refresh_all()

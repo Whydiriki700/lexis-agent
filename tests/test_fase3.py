@@ -301,6 +301,62 @@ class TestPlanMode(unittest.TestCase):
                 bridge.stream_chat = old
 
 
+class TestCompletionLoop(unittest.TestCase):
+    """The completion loop's write side (golden run 2 finding,
+    2026-11-10): one reply may carry several write markers; all
+    of them execute as a unit, and a repeated write of the same
+    path with identical content is not executed again."""
+
+    def test_multi_marker_reply_executes_as_one_unit(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        a = os.path.join(tmp, "a.py")
+        b = os.path.join(tmp, "b.py")
+        calls = []
+
+        def fake(model, messages, key):
+            calls.append(1)
+            if len(calls) == 1:
+                yield (f"[WRITE_FILE: {a}]print('a')\n[/WRITE_FILE]\n"
+                       f"[WRITE_FILE: {b}]print('b')\n[/WRITE_FILE]")
+            else:
+                yield "both files written"
+
+        pulse, ledger, vault, old = make_pulse(tmp, fake)
+        self.addCleanup(ledger.close)
+        try:
+            self.assertEqual(pulse.handle_turn("write both"), "done")
+        finally:
+            bridge.stream_chat = old
+        self.assertEqual(len(calls), 2)
+        with open(a, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "print('a')")
+        with open(b, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "print('b')")
+
+    def test_duplicate_write_is_not_repeated(self):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, True)
+        a = os.path.join(tmp, "a.py")
+        calls = []
+
+        def fake(model, messages, key):
+            calls.append(1)
+            yield f"[WRITE_FILE: {a}]print('a')\n[/WRITE_FILE]"
+
+        pulse, ledger, vault, old = make_pulse(tmp, fake)
+        self.addCleanup(ledger.close)
+        try:
+            self.assertEqual(pulse.handle_turn("write it"), "done")
+        finally:
+            bridge.stream_chat = old
+        # Call 1 writes and continues; call 2 repeats the same
+        # write, and the guard ends the turn instead of looping.
+        self.assertEqual(len(calls), 2)
+        with open(a, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "print('a')")
+
+
 class TestGoldenSet(unittest.TestCase):
     def test_golden_tasks_end_to_end(self):
         tmp = tempfile.mkdtemp()
@@ -310,8 +366,11 @@ class TestGoldenSet(unittest.TestCase):
             bad = os.path.join(tmp, "broken.py")
             replies = iter([
                 f"[WRITE_FILE: {good}]print('hello')\n[/WRITE_FILE]",
+                "hello written",
                 f"[WRITE_FILE: {bad}]def broken(:\n[/WRITE_FILE]",
+                "broken written",
                 f"[READ_FILE: {good}]",
+                "isi file sudah kubaca",
             ])
 
             def fake(model, messages, key):
@@ -322,7 +381,9 @@ class TestGoldenSet(unittest.TestCase):
             try:
                 self.assertEqual(pulse.handle_turn("write hello"), "done")
                 self.assertEqual(pulse.handle_turn("write broken"), "done")
-                self.assertEqual(pulse.handle_turn("read it"), "file_read")
+                # A read continues inside the same turn (the original
+                # looped with `continue`): the follow-up reply ends it.
+                self.assertEqual(pulse.handle_turn("read it"), "done")
             finally:
                 bridge.stream_chat = old
             self.assertTrue(os.path.isfile(good))
@@ -333,8 +394,12 @@ class TestGoldenSet(unittest.TestCase):
                 ).fetchall()
             ]
             self.assertTrue(verdicts[0].startswith("pass"))
-            self.assertTrue(verdicts[1].startswith("fail"))
-            self.assertEqual(len(ledger.cost_rows()), 3)
+            # The broken write is the third judged call (each write
+            # is followed by its continuation call).
+            self.assertTrue(verdicts[2].startswith("fail"))
+            # 6 model calls: write + continuation, write +
+            # continuation, read + continuation.
+            self.assertEqual(len(ledger.cost_rows()), 6)
 
 
 # ---------------- Visor ----------------

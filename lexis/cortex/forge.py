@@ -93,3 +93,20 @@ def find_write_marker(text: str):
         content = text[content_start:content_end].strip()
         return filename, content
     return None
+
+
+def find_write_markers(text: str):
+    """All complete (path, content) write markers in a reply, in
+    order, each parsed exactly like find_write_marker. The
+    original executed the first marker only; a reply that itself
+    carries a whole multi-file plan is executed as a unit by the
+    completion loop (see pulse.Pulse.handle_turn)."""
+    out = []
+    rest = text
+    while True:
+        one = find_write_marker(rest)
+        if one is None:
+            return out
+        out.append(one)
+        end = rest.find(WRITE_END)
+        rest = rest[end + len(WRITE_END):]

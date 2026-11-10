@@ -17,6 +17,7 @@ finished turn is judged and costed into the ledger, and plan mode
 drafts under a tool-level write ban, then executes step by step.
 """
 
+import hashlib
 import json
 import re
 import time
@@ -94,6 +95,7 @@ class Pulse:
         self.plan = []
         self.plan_goal = ""
         self._turn_tools = []
+        self._written_sigs = set()
 
     def _event(self, kind: str, data: dict) -> None:
         if self.on_event is not None:
@@ -102,7 +104,7 @@ class Pulse:
     def _finish(self, outcome, started, model_used, prompt_tokens, full):
         """Judge and cost every finished turn into the ledger."""
         duration = time.time() - started
-        if outcome in ("done", "file_read"):
+        if outcome in ("done", "file_read", "write_done"):
             verdict = judge_mod.verify_turn(full, self._turn_tools, self.root)
             self.ledger.append_event(
                 self.session_id, "judge",
@@ -119,10 +121,80 @@ class Pulse:
             "duration": duration, "outcome": outcome,
         })
 
+    def _do_write(self, path: str, content: str) -> str:
+        """Execute one write marker through the warden and, in ASK
+        modes, the owner. Returns 'written', or 'stopped' when the
+        write was held, declined, or failed (the turn then ends,
+        as the original ended it after a write decision)."""
+        try:
+            self.emit_line(f"  [IZIN: Lexis ingin menulis file '{path}']")
+            self._event("approval_needed", {
+                "name": "write_file", "path": path, "content": content,
+            })
+            decision = self.warden.decide(self.forge.risk_of("write_file"))
+            if decision == DENY:
+                self._event("tool_end", {
+                    "name": "write_file", "path": path, "ok": False,
+                    "detail": "held by plan mode", "duration": 0.0,
+                })
+                self._turn_tools.append({
+                    "name": "write_file", "ok": False, "path": path,
+                    "detail": "held by plan mode",
+                })
+                self.emit_line(
+                    "  [SISTEM: Mode rencana aktif: penulisan ditahan.]\n"
+                )
+                return "stopped"
+            allowed = False
+            if decision == ALLOW:
+                allowed = True
+            elif decision == ASK:
+                allowed = self.ask("  Izinkan? (y/n): ").lower() == "y"
+            if not allowed:
+                self._event("tool_end", {
+                    "name": "write_file", "path": path, "ok": False,
+                    "detail": "not approved", "duration": 0.0,
+                })
+                self._turn_tools.append({
+                    "name": "write_file", "ok": False, "path": path,
+                    "detail": "not approved",
+                })
+                self.emit_line("  [SISTEM: Dibatalkan.]\n")
+                return "stopped"
+            self._event("tool_start", {
+                "name": "write_file", "path": path,
+                "content": content,
+            })
+            t0 = time.time()
+            self.forge.call("write_file", path=path, content=content)
+            detail = f"{len(content.encode('utf-8'))} bytes written"
+            self._event("tool_end", {
+                "name": "write_file", "path": path, "ok": True,
+                "detail": detail, "duration": time.time() - t0,
+            })
+            self._turn_tools.append({
+                "name": "write_file", "ok": True, "path": path,
+                "content": content, "detail": detail,
+            })
+            self.emit_line(f"  [SISTEM: File '{path}' ditulis!]\n")
+            self.ledger.append_event(
+                self.session_id, "tool", "write_file " + path
+            )
+            return "written"
+        except Exception as e:
+            self.emit_line(f"  [SISTEM ERROR: {e}]\n")
+            return "stopped"
+
     def handle_turn(self, user_text: str) -> str:
-        """Run one user turn. Returns 'done' or 'file_read', mirroring
-        the original control flow (after a file read, the original
-        waits for the next user input without storing the reply)."""
+        """Run one user turn as a completion loop: a file read or a
+        successful write does not end the turn. The result is fed
+        back and the model is called again inside the same turn,
+        without storing the marker reply and without waiting for
+        the user, until the model answers without file markers.
+        (The original looped reads this way but ended the turn
+        after one write; the loop now covers writes too, so one
+        instruction can finish a multi-file task. Every write
+        still passes the warden and, in EMBER, the owner.)"""
         self.vault.add("user", user_text)
         self.ledger.append_message(self.session_id, "user", user_text)
         learned = self.vault.learn_from(self.ledger, self.session_id, user_text)
@@ -134,6 +206,22 @@ class Pulse:
             report = prism.compact(self.vault, self.ledger, self.session_id)
             if report:
                 self._event("compaction", report)
+        self._written_sigs = set()
+        actions = 0
+        while True:
+            outcome = self._turn_once(user_text)
+            if outcome not in ("file_read", "write_done"):
+                return outcome
+            actions += 1
+            if actions >= 25:
+                # Safety valve: the original looped reads without a
+                # cap; 25 consecutive tool actions in one turn is a
+                # runaway, so the turn ends with what it has.
+                return "done"
+
+    def _turn_once(self, user_text: str) -> str:
+        """One model call plus its marker handling. Returns 'done',
+        'file_read', 'write_done', or 'cancelled'."""
         self._turn_tools = []
         started = time.time()
         messages = self.vault.messages()
@@ -236,65 +324,45 @@ class Pulse:
                 })
                 self.emit_line(f"  [SISTEM ERROR: {e}]\n")
 
-        write = forge_mod.find_write_marker(full)
-        if write is not None:
-            path, content = write
-            try:
-                self.emit_line(f"  [IZIN: Lexis ingin menulis file '{path}']")
-                self._event("approval_needed", {
-                    "name": "write_file", "path": path, "content": content,
-                })
-                decision = self.warden.decide(self.forge.risk_of("write_file"))
-                if decision == DENY:
-                    self._event("tool_end", {
-                        "name": "write_file", "path": path, "ok": False,
-                        "detail": "held by plan mode", "duration": 0.0,
-                    })
-                    self._turn_tools.append({
-                        "name": "write_file", "ok": False, "path": path,
-                        "detail": "held by plan mode",
-                    })
+        markers = forge_mod.find_write_markers(full)
+        if markers:
+            written = []
+            stopped = False
+            for path, content in markers:
+                sig = hashlib.sha256(
+                    (path + "\n" + content).encode("utf-8")
+                ).hexdigest()
+                if sig in self._written_sigs:
                     self.emit_line(
-                        "  [SISTEM: Mode rencana aktif: penulisan ditahan.]\n"
+                        f"  [SISTEM: '{path}' sudah ditulis, dilewati.]\n"
                     )
+                    continue
+                if self._do_write(path, content) == "written":
+                    self._written_sigs.add(sig)
+                    written.append(path)
                 else:
-                    allowed = False
-                    if decision == ALLOW:
-                        allowed = True
-                    elif decision == ASK:
-                        allowed = self.ask("  Izinkan? (y/n): ").lower() == "y"
-                    if allowed:
-                        self._event("tool_start", {
-                            "name": "write_file", "path": path,
-                            "content": content,
-                        })
-                        t0 = time.time()
-                        self.forge.call("write_file", path=path, content=content)
-                        detail = f"{len(content.encode('utf-8'))} bytes written"
-                        self._event("tool_end", {
-                            "name": "write_file", "path": path, "ok": True,
-                            "detail": detail, "duration": time.time() - t0,
-                        })
-                        self._turn_tools.append({
-                            "name": "write_file", "ok": True, "path": path,
-                            "content": content, "detail": detail,
-                        })
-                        self.emit_line(f"  [SISTEM: File '{path}' ditulis!]\n")
-                        self.ledger.append_event(
-                            self.session_id, "tool", "write_file " + path
-                        )
-                    else:
-                        self._event("tool_end", {
-                            "name": "write_file", "path": path, "ok": False,
-                            "detail": "not approved", "duration": 0.0,
-                        })
-                        self._turn_tools.append({
-                            "name": "write_file", "ok": False, "path": path,
-                            "detail": "not approved",
-                        })
-                        self.emit_line("  [SISTEM: Dibatalkan.]\n")
-            except Exception as e:
-                self.emit_line(f"  [SISTEM ERROR: {e}]\n")
+                    stopped = True
+                    break
+            if written and not stopped:
+                names = ", ".join(written)
+                result_msg = (
+                    f"[HASIL TULIS FILE {names}]: berhasil ditulis. "
+                    "Lanjutkan tugas sampai selesai. Jangan menulis "
+                    "ulang berkas yang sudah ditulis; kalau tugas "
+                    "sudah selesai, jawab dengan teks biasa tanpa "
+                    "penanda berkas."
+                )
+                self.vault.add("user", result_msg)
+                self.ledger.append_message(
+                    self.session_id, "user", result_msg
+                )
+                self.emit_line("  [Lexis melanjutkan...]\n")
+                self._finish("write_done", started, model_used,
+                             prompt_tokens, full)
+                return "write_done"
+            # Stopped by a decision, or every marker duplicated
+            # work already done this turn: the turn ends below
+            # with the reply stored, like a finished turn.
 
         self.vault.add("assistant", full)
         self.ledger.append_message(self.session_id, "assistant", full)

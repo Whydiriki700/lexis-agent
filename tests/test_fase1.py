@@ -240,7 +240,16 @@ class TestPulseFakeStream(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             led = Ledger(os.path.join(d, "state.db"))
 
-            def build(chunks, ask_answer="y"):
+            def build(script, ask_answer="y"):
+                if script and isinstance(script[0], str):
+                    script = [script]
+                calls = {"n": 0}
+
+                def fake_stream(model, messages, key):
+                    idx = min(calls["n"], len(script) - 1)
+                    calls["n"] += 1
+                    return iter(script[idx])
+
                 comp = Compass()
                 vault = Vault()
                 vault.bootstrap()
@@ -252,9 +261,7 @@ class TestPulseFakeStream(unittest.TestCase):
                     ask=lambda prompt: ask_answer,
                 )
                 orig = bridge.stream_chat
-                bridge.stream_chat = (
-                    lambda model, messages, key: iter(chunks)
-                )
+                bridge.stream_chat = fake_stream
                 try:
                     result = pulse.handle_turn("halo")
                 finally:
@@ -271,17 +278,27 @@ class TestPulseFakeStream(unittest.TestCase):
 
             target = os.path.join(d, "doc.txt")
             Path(target).write_text("ISI DOKUMEN", encoding="utf-8")
-            result, vault, _ = build([f"baik [READ_FILE: {target}]"])
-            self.assertEqual(result, "file_read")
+            result, vault, _ = build([
+                [f"baik [READ_FILE: {target}]"],
+                ["isi dokumen sudah kubaca"],
+            ])
+            # The original continues inside the same turn after a
+            # read: the file content is injected and the model answers
+            # again; the read-request reply itself is never stored.
+            self.assertEqual(result, "done")
             self.assertTrue(
                 any("HASIL BACA FILE" in m["content"] for m in vault.messages())
             )
-            self.assertNotEqual(vault.messages()[-1]["role"], "assistant")
+            self.assertEqual(
+                vault.messages()[-1],
+                {"role": "assistant", "content": "isi dokumen sudah kubaca"},
+            )
 
             out_file = os.path.join(d, "out.txt")
-            result, _, _ = build(
-                [f"[WRITE_FILE: {out_file}] konten baru [/WRITE_FILE]"]
-            )
+            result, _, _ = build([
+                [f"[WRITE_FILE: {out_file}] konten baru [/WRITE_FILE]"],
+                ["selesai"],
+            ])
             self.assertEqual(result, "done")
             self.assertEqual(
                 Path(out_file).read_text(encoding="utf-8"), "konten baru"
@@ -294,6 +311,44 @@ class TestPulseFakeStream(unittest.TestCase):
                 Path(out_file).read_text(encoding="utf-8"), "konten baru"
             )
             led.close()
+
+
+class TestBridgeProviders(unittest.TestCase):
+    """Providers (Master, 2026-11-10): unlimited, any endpoint,
+    keys only ever in the profile .env."""
+
+    def test_unlimited_providers_and_key_hygiene(self):
+        from lexis.cortex import bridge
+
+        with tempfile.TemporaryDirectory() as d:
+            env_path = os.path.join(d, ".env")
+            Path(env_path).write_text(
+                "DEEPSEEK_API_KEY=legacy-fixture\n", encoding="utf-8"
+            )
+            self.assertEqual(bridge.provider_name(d), "Osvyn")
+            self.assertEqual(bridge.current_key(d), "legacy-fixture")
+            bridge.add_provider(
+                d, "Kedua", "https://api.example.com/v1",
+                "fixture-key-2",
+            )
+            self.assertEqual(bridge.provider_name(d), "Kedua")
+            self.assertEqual(bridge.current_key(d), "fixture-key-2")
+            self.assertEqual(
+                bridge.base_url(d), "https://api.example.com/v1"
+            )
+            names = [p["name"] for p in bridge.list_providers(d)]
+            self.assertEqual(names, ["Osvyn", "Kedua"])
+            providers_text = Path(
+                os.path.join(d, "providers.json")
+            ).read_text(encoding="utf-8")
+            self.assertNotIn("fixture-key-2", providers_text)
+            self.assertIn(
+                "LEXIS_PROVIDER_KEDUA_KEY=fixture-key-2",
+                Path(env_path).read_text(encoding="utf-8"),
+            )
+            self.assertTrue(bridge.set_active_provider(d, "Osvyn"))
+            self.assertEqual(bridge.current_key(d), "legacy-fixture")
+            self.assertFalse(bridge.set_active_provider(d, "TidakAda"))
 
 
 if __name__ == "__main__":

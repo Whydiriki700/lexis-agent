@@ -84,22 +84,25 @@ Screen {
 }
 
 #status {
-    height: 1;
+    height: 2;
     background: $pnl;
     padding: 0 1;
 }
 
-#composer {
-    height: 5;
+#composerbox {
     border: solid $line2;
     background: $bg;
-    margin: 0 1;
     padding: 0 1;
+    height: auto;
+}
+
+#composer {
+    height: 4;
+    background: $bg;
 }
 
 #hints {
     height: 1;
-    padding: 0 1;
     color: $faint;
 }
 
@@ -142,7 +145,7 @@ Screen {
 }
 
 #typing {
-    height: 1;
+    height: 2;
     display: none;
     color: $amber;
 }
@@ -205,4 +208,28 @@ BootScreen Vertical {
 #boot-bar {
     width: 64;
     margin-top: 1;
+}
+
+.sep {
+    height: 1;
+    margin-top: 1;
+}
+
+#slashmenu {
+    display: none;
+    border: solid $line2;
+    background: $pnl;
+    padding: 0 1;
+    margin-top: 1;
+    height: auto;
+    max-height: 12;
+}
+
+#slashmenu.on {
+    display: block;
+}
+
+#status {
+    border-top: solid $line2;
+    padding: 0 1;
 }

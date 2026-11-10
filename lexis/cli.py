@@ -11,6 +11,7 @@ original main.py, with sessions journaled to lexis_data/state.db
 and `--resume` restoring the last session.
 """
 
+import getpass
 import os
 import sys
 import threading
@@ -156,6 +157,51 @@ def run_chat(argv) -> int:
                     print(f"[Model aktif: {compass.current}]\n")
                 else:
                     print("[Model tidak ditemukan]\n")
+                continue
+            if low == "/provider" or low.startswith("/provider "):
+                arg = user_input.strip()[10:].strip()
+                providers = bridge.list_providers(ROOT)
+                if arg:
+                    if bridge.set_active_provider(ROOT, arg):
+                        print(f"[Provider aktif: {arg}]\n")
+                    else:
+                        names = ", ".join(p["name"] for p in providers)
+                        print(f"[Provider tidak ditemukan. "
+                              f"Tersedia: {names}]\n")
+                    continue
+                print("\nProvider tersimpan (tanpa batas):")
+                for i, p in enumerate(providers, 1):
+                    mark = (" (aktif)" if p["name"]
+                            == bridge.provider_name(ROOT) else "")
+                    print(f"  {i}. {p['name']}{mark}")
+                print("  0. Tambah provider baru")
+                pilih = input(
+                    "Pilih nomor atau nama provider: "
+                ).strip()
+                if pilih == "0":
+                    name = input("Nama provider: ").strip()
+                    base = input("Base URL: ").strip()
+                    key = getpass.getpass(
+                        "API key (tidak ditampilkan): "
+                    ).strip()
+                    if name and base:
+                        bridge.add_provider(ROOT, name, base, key)
+                        print(f"[Provider {name} tersimpan dan "
+                              "aktif. Kunci hanya disimpan di .env "
+                              "profil.]\n")
+                    else:
+                        print("[Nama dan base URL wajib diisi.]\n")
+                    continue
+                chosen = None
+                if pilih.isdigit() and 1 <= int(pilih) <= len(providers):
+                    chosen = providers[int(pilih) - 1]["name"]
+                elif any(p["name"] == pilih for p in providers):
+                    chosen = pilih
+                if chosen and bridge.set_active_provider(ROOT, chosen):
+                    print(f"[Provider aktif: {chosen}]\n")
+                else:
+                    print("[Pilihan tidak dikenal, tetap pakai "
+                          "yang aktif.]\n")
                 continue
             if low == "/plan" or low.startswith("/plan "):
                 arg = user_input.strip()[5:].strip()
