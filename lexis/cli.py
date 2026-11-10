@@ -67,6 +67,10 @@ def main(argv=None) -> int:
         from lexis import doctor
 
         return doctor.run()
+    if argv and argv[0] == "visor":
+        from lexis.visor.app import run_visor
+
+        return run_visor(argv[1:])
     interactive = (
         "--interactive" in argv or "-i" in argv or sys.stdin.isatty()
     )

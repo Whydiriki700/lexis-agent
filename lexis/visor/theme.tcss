@@ -1,0 +1,189 @@
+/* Lexis Visor theme: Foxfire Ember.
+   Foxfire orange #ff7a29 + amber #e0a83c on warm charcoal black.
+   Blue and Osvyn cyan are never used for Lexis. */
+
+$ember: #ff7a29;
+$amber: #e0a83c;
+$bg: #0c0a08;
+$pnl: #171310;
+$pnl2: #100d0a;
+$line: #2b2118;
+$line2: #3d2d1d;
+$txt: #e8ded2;
+$dim: #a08b74;
+$faint: #6f5f4e;
+$green: #3fb96f;
+$red: #e05c5c;
+
+Screen {
+    background: $bg;
+    color: $txt;
+}
+
+#hdr {
+    height: 1;
+    background: $pnl;
+    padding: 0 1;
+}
+
+#body {
+    height: 1fr;
+}
+
+#main {
+    width: 1fr;
+    height: 100%;
+}
+
+#bannerbox {
+    background: $pnl2;
+    border: solid $line;
+    padding: 0 1;
+    margin-bottom: 1;
+    height: auto;
+}
+
+#welcome {
+    color: $dim;
+    height: auto;
+}
+
+#chat {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#rail {
+    width: 44;
+    height: 100%;
+    background: $pnl2;
+    padding: 0 1;
+}
+
+.pnl {
+    border: solid $line;
+    background: $pnl;
+    padding: 0 1;
+    margin-bottom: 1;
+    height: auto;
+}
+
+#ctxbar {
+    height: 1;
+    margin: 0 0 1 0;
+}
+
+#writebar {
+    height: 1;
+    margin: 0 1;
+    display: none;
+}
+
+#writebar.on {
+    display: block;
+}
+
+#status {
+    height: 1;
+    background: $pnl;
+    padding: 0 1;
+}
+
+#composer {
+    height: 5;
+    border: solid $line2;
+    background: $bg;
+    margin: 0 1;
+    padding: 0 1;
+}
+
+#hints {
+    height: 1;
+    padding: 0 1;
+    color: $faint;
+}
+
+.msg {
+    margin-bottom: 1;
+    height: auto;
+}
+
+.card {
+    border-left: thick $faint;
+    background: $pnl;
+    padding: 0 1;
+    margin-bottom: 1;
+    height: auto;
+}
+
+.card.ok {
+    border-left: thick $green;
+}
+
+.card.run {
+    border-left: thick $ember;
+}
+
+.card.wait {
+    border-left: thick $amber;
+}
+
+#livecode {
+    border: solid $line;
+    background: #0a0806;
+    padding: 0 1;
+    margin-bottom: 1;
+    height: auto;
+    display: none;
+}
+
+#livecode.on {
+    display: block;
+}
+
+#typing {
+    height: 1;
+    display: none;
+    color: $amber;
+}
+
+#typing.on {
+    display: block;
+}
+
+.modalbox {
+    background: $pnl;
+    border: solid $line2;
+    padding: 1 2;
+    width: 88;
+    height: auto;
+    max-height: 92%;
+}
+
+.modalbox Horizontal {
+    height: auto;
+}
+
+ApprovalScreen, PaletteScreen, PickScreen {
+    align: center middle;
+    background: rgba(0, 0, 0, 0.55);
+}
+
+.modalbox Button {
+    margin-right: 1;
+}
+
+OptionList {
+    background: $pnl;
+    border: solid $line;
+    height: auto;
+    max-height: 16;
+}
+
+ProgressBar > .bar--bar {
+    background: $ember;
+}
+
+ProgressBar > .bar--complete {
+    background: $amber;
+}

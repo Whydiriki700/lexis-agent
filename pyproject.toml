@@ -12,10 +12,11 @@ requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
     "python-dotenv>=1.0",
+    "textual>=8.0",
 ]
 
 [project.scripts]
 lexis = "lexis.cli:main"
 
 [tool.setuptools]
-packages = ["lexis", "lexis.cortex"]
+packages = ["lexis", "lexis.cortex", "lexis.visor"]

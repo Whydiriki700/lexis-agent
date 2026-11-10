@@ -146,6 +146,34 @@ class TestLedgerVault(unittest.TestCase):
             self.assertEqual(len(msgs), 3)
 
 
+class TestDocuments(unittest.TestCase):
+    def test_document_versions(self):
+        import hashlib
+
+        from lexis.cortex.ledger import Ledger
+
+        def sha(s):
+            return hashlib.sha256(s.encode()).hexdigest()
+
+        with tempfile.TemporaryDirectory() as d:
+            led = Ledger(os.path.join(d, "state.db"))
+            self.assertEqual(led.store_document("A.md", "satu", sha("satu")), 1)
+            # identical content: no new version
+            self.assertEqual(led.store_document("A.md", "satu", sha("satu")), 1)
+            # changed content: version 2, version 1 still intact in history
+            self.assertEqual(led.store_document("A.md", "dua", sha("dua")), 2)
+            latest = led.latest_document("A.md")
+            self.assertEqual(latest["version"], 2)
+            self.assertEqual(latest["content"], "dua")
+            rows = led._conn.execute(
+                "SELECT COUNT(*) FROM documents WHERE name = 'A.md'"
+            ).fetchone()[0]
+            self.assertEqual(rows, 2)
+            self.assertEqual(led.document_names(), ["A.md"])
+            self.assertIsNone(led.latest_document("tidak-ada.md"))
+            led.close()
+
+
 class TestPulseFakeStream(unittest.TestCase):
     def test_turns(self):
         from lexis.cortex import bridge

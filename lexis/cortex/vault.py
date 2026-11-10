@@ -32,8 +32,13 @@ class Vault:
         return self.messages()
 
     def register_config(self, root: str, ledger) -> list:
-        """Hash every config/*.md into the ledger registry (read-only).
-        Content is never altered and never injected in Fase 1."""
+        """Register every config/*.md in state.db (read-only import):
+        hash registry plus the full text stored as a versioned
+        document, so the whole configuration lives inside state.db
+        and no edit is ever lost. The source files are never altered,
+        and Fase 1/2 do not inject config content into conversations.
+        Locked files (JAILBREAK.md) are stored exactly like the rest:
+        read-only here as everywhere else."""
         registered = []
         cfg = os.path.join(root, "config")
         if os.path.isdir(cfg):
@@ -41,8 +46,10 @@ class Vault:
                 if name.endswith(".md"):
                     with open(os.path.join(cfg, name), "rb") as f:
                         data = f.read()
-                    ledger.register_config_doc(
-                        name, hashlib.sha256(data).hexdigest(), len(data)
+                    digest = hashlib.sha256(data).hexdigest()
+                    ledger.register_config_doc(name, digest, len(data))
+                    ledger.store_document(
+                        name, data.decode("utf-8", errors="replace"), digest
                     )
                     registered.append(name)
         return registered
