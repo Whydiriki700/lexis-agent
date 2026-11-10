@@ -33,8 +33,8 @@ uv tool install lexis-agent
 
 Either way, the command you run afterwards is `lexis`.
 
-A standalone Windows build for people who do not use Python is planned;
-until it is signed and published, use one of the two installs above.
+Lexis installs through the terminal only. There is no standalone
+Windows build; if that ever changes, it will be announced here.
 
 ## First run
 

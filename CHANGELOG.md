@@ -9,6 +9,8 @@ for new abilities, the last number for fixes).
 
 - The install name is set: `pip install lexis-agent` (and the same name for
   pipx and uv). The command you run stays `lexis`.
+- Lexis installs through the terminal only; there is no standalone
+  Windows build.
 - Packaging foundation: one `lexis` command, installable with pipx or uv,
   with `lexis --version` and a read-only `lexis doctor` that checks the
   installation and explains, in plain language, anything that needs
