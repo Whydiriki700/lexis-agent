@@ -1,4 +1,4 @@
-![Lexis Agent](lexis-repo-final-dari-master.jpg)
+![Lexis Agent](lexis-agent-cover.jpg)
 
 # Lexis Agent
 
