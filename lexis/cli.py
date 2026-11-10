@@ -1,12 +1,14 @@
 # Copyright 2026 Riki Wahyudi (Osvyn)
 # SPDX-License-Identifier: Apache-2.0
-"""Plain CLI surface for Lexis (Fase 1).
+"""Command entry for Lexis.
 
-Behavior mirrors the original main.py exactly: same header, same
-prompts, same /model flow, same spinner. The only additions are
-invisible by default: sessions are journaled to lexis_data/state.db
-and `--resume` restores the last session. The Visor (Textual) surface
-replaces this face in Fase 2 without touching the Cortex.
+Bare `lexis` in a terminal opens the Visor, the full interface
+(Master's decision, 2026-11-10): banner, panels, live coding, and
+the whole configuration loaded from the project home. The plain
+chat loop of Fase 1 stays available as `lexis chat` (or -i): same
+header, same prompts, same /model flow, same spinner as the
+original main.py, with sessions journaled to lexis_data/state.db
+and `--resume` restoring the last session.
 """
 
 import os
@@ -71,18 +73,28 @@ def main(argv=None) -> int:
         from lexis.visor.app import run_visor
 
         return run_visor(argv[1:])
-    interactive = (
-        "--interactive" in argv or "-i" in argv or sys.stdin.isatty()
-    )
-    if not interactive:
+    if argv and argv[0] == "chat":
+        return run_chat(argv[1:])
+    if "--interactive" in argv or "-i" in argv:
+        return run_chat(argv)
+    if not argv or argv == ["--resume"]:
+        if sys.stdout.isatty():
+            from lexis.visor.app import run_visor
+
+            return run_visor(argv)
         import lexis
 
         print(f"Lexis Agent {lexis.__version__}")
-        print("Run Lexis in a terminal to start chatting,")
-        print("or use: lexis doctor | lexis --version | lexis --resume")
+        print("Open lexis in a terminal for the full interface,")
+        print("or use: lexis chat | lexis doctor | lexis --version")
         return 0
+    return run_chat(argv)
+
+
+def run_chat(argv) -> int:
+    """The plain chat loop (Fase 1 surface, kept as `lexis chat`)."""
     bridge.load_env(ROOT)
-    compass = Compass()
+    compass = Compass(ROOT)
     warden = Warden(os.getenv("LEXIS_MODE", "EMBER"))
     forge = Forge()
     data_dir = os.path.join(ROOT, "lexis_data")
@@ -144,6 +156,39 @@ def main(argv=None) -> int:
                     print(f"[Model aktif: {compass.current}]\n")
                 else:
                     print("[Model tidak ditemukan]\n")
+                continue
+            if low == "/plan" or low.startswith("/plan "):
+                arg = user_input.strip()[5:].strip()
+                if not arg:
+                    if pulse.plan:
+                        print(f"\nRencana: {pulse.plan_goal}")
+                        for i, s in enumerate(pulse.plan, 1):
+                            print(f"  {i}. [{s['state']}] {s['label']}")
+                        print("Ketik /plan run untuk menjalankan.\n")
+                    else:
+                        print("[Belum ada rencana. "
+                              "Buat dengan /plan <tujuan>]\n")
+                elif arg.lower() == "run":
+                    spinner.start()
+                    try:
+                        pulse.run_plan()
+                    finally:
+                        spinner.stop()
+                elif arg.lower() == "clear":
+                    pulse.plan = []
+                    pulse.plan_goal = ""
+                    print("[Rencana dihapus.]\n")
+                else:
+                    spinner.start()
+                    try:
+                        steps = pulse.draft_plan(arg)
+                    finally:
+                        spinner.stop()
+                    print("\nRencana:")
+                    for i, s in enumerate(steps, 1):
+                        print(f"  {i}. {s}")
+                    print("Tidak ada file yang diubah selama menyusun "
+                          "rencana. Ketik /plan run untuk menjalankan.\n")
                 continue
             spinner.start()
             try:

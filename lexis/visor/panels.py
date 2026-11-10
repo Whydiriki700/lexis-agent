@@ -97,16 +97,19 @@ def context_percent(messages) -> int:
 
 def memory_text(ledger, session_id: int, documents) -> Text:
     conn = ledger._conn
-    facts = conn.execute(
-        "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
-    ).fetchone()[0]
     journal = conn.execute(
         "SELECT COUNT(*) FROM events WHERE session_id = ?", (session_id,)
     ).fetchone()[0]
+    promises = ledger.fact_count(kind="decision") + ledger.fact_count(
+        kind="promise"
+    )
     out = Text()
     out.append("MEMORY", style=f"bold {DIM}")
-    _kv(out, "Facts this session", str(facts))
+    _kv(out, "Facts this session",
+        str(ledger.fact_count(session_id=session_id)))
+    _kv(out, "Facts in memory", str(ledger.fact_count()))
     _kv(out, "Episodes stored", str(ledger.session_count()))
+    _kv(out, "Promises & decisions", str(promises))
     _kv(out, "Session journal", f"{journal} entries recorded")
     _kv(out, "Memory file",
         f"state.db · {len(documents)} MD files stored inside")
@@ -114,10 +117,54 @@ def memory_text(ledger, session_id: int, documents) -> Text:
     return out
 
 
-def skills_text() -> Text:
+def skills_text(ledger=None, session_id=None) -> Text:
+    saved = None
+    if ledger is not None and session_id is not None:
+        import json
+
+        total = 0
+        rows = ledger._conn.execute(
+            "SELECT detail FROM events WHERE session_id = ? "
+            "AND kind = 'compaction'",
+            (session_id,),
+        ).fetchall()
+        for (detail,) in rows:
+            try:
+                d = json.loads(detail)
+                total += int(d.get("before_tokens", 0)) - int(
+                    d.get("after_tokens", 0)
+                )
+            except ValueError:
+                pass
+        if total > 0:
+            saved = f"~{total / 1000:.1f}K tokens by condensing"
     out = Text()
     out.append("SKILLS & SAVINGS", style=f"bold {DIM}")
     _kv(out, "Skills installed", "none yet")
     _kv(out, "Active this turn", "—")
-    _kv(out, "Saved this turn", "—")
+    _kv(out, "Saved by memory", saved or "—")
+    return out
+
+
+MODE_LINES = {
+    "EMBER": "Guardian · may hold a harmful order",
+    "BLAZE": "Loyal · warns once, then your word stands",
+    "INFERNO": "Full compliance · your word is law",
+}
+
+
+def mode_text(mode: str) -> Text:
+    """The compliance ladder, shown permanently in the rail."""
+    out = Text()
+    out.append("COMPLIANCE", style=f"bold {DIM}")
+    for name in ("EMBER", "BLAZE", "INFERNO"):
+        out.append("\n")
+        if name == mode:
+            out.append("▸ ", style=EMBER)
+            out.append(name, style=f"bold {RED if name == 'INFERNO' else AMBER}")
+            out.append(f"  {MODE_LINES[name]}", style=TXT)
+        else:
+            out.append("· ", style=FAINT)
+            out.append(name, style=DIM)
+            out.append(f"  {MODE_LINES[name]}", style=FAINT)
     return out

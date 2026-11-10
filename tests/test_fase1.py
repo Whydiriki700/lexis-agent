@@ -68,7 +68,13 @@ class TestFidelity(unittest.TestCase):
 
         self.assertEqual(MODELS, models)
         self.assertEqual(len(MODELS), 21)
-        self.assertEqual(DEFAULT_MODEL, default)
+        # The catalog still matches the original exactly. The default
+        # deliberately no longer does: Master's decision (2026-11-10)
+        # sets deepseek-v4.1-flash-1017-fast as the default and the
+        # mandatory test model. The original main.py keeps its own
+        # default (default, read live above) and is never modified.
+        self.assertEqual(DEFAULT_MODEL, "deepseek-v4.1-flash-1017-fast")
+        self.assertIn(default, MODELS)
         c = Compass()
         self.assertTrue(c.select("3"))
         self.assertEqual(c.current, models[2])

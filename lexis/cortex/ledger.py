@@ -52,6 +52,19 @@ CREATE TABLE IF NOT EXISTS documents (
     stored_at TEXT NOT NULL,
     PRIMARY KEY (name, version)
 );
+CREATE TABLE IF NOT EXISTS facts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    text TEXT NOT NULL,
+    tags TEXT NOT NULL DEFAULT '',
+    ts TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS session_tags (
+    session_id INTEGER NOT NULL,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (session_id, tag)
+);
 """
 
 
@@ -181,6 +194,122 @@ class Ledger:
         return int(
             self._conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
         )
+
+    # --- Fase 3: cold-tier facts, episode tags, cost telemetry ---
+
+    def add_fact(self, session_id: int, kind: str, text: str,
+                 tags: str = "") -> bool:
+        """Store one durable fact (cold tier). Identical text is stored
+        once: memory must not fill with copies of the same fact.
+        Returns True when a new fact was written."""
+        row = self._conn.execute(
+            "SELECT id FROM facts WHERE text = ?", (text,)
+        ).fetchone()
+        if row is not None:
+            return False
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO facts (session_id, kind, text, tags, ts) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (session_id, kind, text, tags, _now()),
+            )
+            self._conn.commit()
+        return True
+
+    def facts(self, session_id=None, kind=None, query=None, limit=200):
+        sql = "SELECT id, session_id, kind, text, tags, ts FROM facts"
+        clauses, params = [], []
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if query:
+            clauses.append("text LIKE ?")
+            params.append(f"%{query}%")
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        return [
+            {"id": r[0], "session_id": r[1], "kind": r[2], "text": r[3],
+             "tags": r[4], "ts": r[5]}
+            for r in self._conn.execute(sql, params).fetchall()
+        ]
+
+    def fact_count(self, session_id=None, kind=None) -> int:
+        sql = "SELECT COUNT(*) FROM facts"
+        clauses, params = [], []
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        return int(self._conn.execute(sql, params).fetchone()[0])
+
+    def tag_session(self, session_id: int, tag: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO session_tags (session_id, tag) "
+                "VALUES (?, ?)",
+                (session_id, tag),
+            )
+            self._conn.commit()
+
+    def session_tags(self, session_id: int):
+        return [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT tag FROM session_tags WHERE session_id = ? "
+                "ORDER BY tag",
+                (session_id,),
+            ).fetchall()
+        ]
+
+    def sessions(self, limit=20):
+        rows = self._conn.execute(
+            "SELECT id, started_at, model FROM sessions ORDER BY id DESC "
+            "LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            {"id": r[0], "started_at": r[1], "model": r[2],
+             "tags": self.session_tags(r[0])}
+            for r in rows
+        ]
+
+    def record_cost(self, session_id: int, model: str, seconds: float,
+                    prompt_tokens: int, reply_tokens: int,
+                    outcome: str) -> None:
+        """One finished task's cost record (telemetry for compass).
+        Token counts are estimates (4 chars per token) and are stored
+        labelled as such in the detail payload."""
+        import json
+
+        detail = json.dumps({
+            "model": model, "seconds": round(seconds, 3),
+            "prompt_tokens_est": int(prompt_tokens),
+            "reply_tokens_est": int(reply_tokens),
+            "outcome": outcome,
+        })
+        self.append_event(session_id, "cost", detail)
+
+    def cost_rows(self):
+        import json
+
+        rows = []
+        for (detail,) in self._conn.execute(
+            "SELECT detail FROM events WHERE kind = 'cost' ORDER BY id"
+        ).fetchall():
+            try:
+                rows.append(json.loads(detail))
+            except ValueError:
+                continue
+        return rows
 
     def close(self) -> None:
         for conn in self._all_conns:

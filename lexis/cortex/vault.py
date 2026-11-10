@@ -13,8 +13,46 @@ anti-forgetting doctrine: nothing important lives only in RAM again.
 
 import hashlib
 import os
+import re
 
 from . import persona_data
+
+_DECISION = re.compile(
+    r"\b(decid|agree|setuju|memutus|keputusan|pilih|chosen)", re.I
+)
+_PROMISE = re.compile(r"\b(will|promise|janji|akan)\b", re.I)
+_PERSONAL = re.compile(
+    r"^(my|i|aku|saya)\b|\b(prefer|name is|nama saya|suka|ingat|remember)\b",
+    re.I,
+)
+_SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
+
+
+def extract_facts(text: str):
+    """Deterministic fact extraction from one owner message.
+
+    Returns up to 5 (kind, sentence) pairs where kind is 'decision',
+    'promise', or 'fact'. Only clear owner statements qualify; chat
+    that matches nothing yields nothing. This is the anti-forgetting
+    net: statements are lifted into the cold tier before any context
+    compaction can fold the raw message away."""
+    found = []
+    for raw in _SENTENCE.findall(text or ""):
+        sentence = raw.strip()
+        if len(sentence) < 12:
+            continue
+        if _DECISION.search(sentence):
+            kind = "decision"
+        elif _PROMISE.search(sentence) and _PERSONAL.search(sentence):
+            kind = "promise"
+        elif _PERSONAL.search(sentence):
+            kind = "fact"
+        else:
+            continue
+        found.append((kind, sentence))
+        if len(found) >= 5:
+            break
+    return found
 
 
 class Vault:
@@ -62,3 +100,34 @@ class Vault:
 
     def replace_all(self, messages) -> None:
         self._messages = [dict(m) for m in messages]
+
+    # --- Fase 3: the three tiers -------------------------------------
+    # Hot tier is the live conversation above. Warm tier is tagged
+    # episodes (past sessions in the ledger). Cold tier is durable
+    # facts in state.db, lifted out of conversations by extraction
+    # and by compaction, and never held only in RAM again.
+
+    def remember(self, ledger, session_id: int, kind: str, text: str,
+                 tags: str = "") -> bool:
+        return ledger.add_fact(session_id, kind, text, tags)
+
+    def learn_from(self, ledger, session_id: int, text: str) -> int:
+        """Extract and store the durable statements in one message.
+        Returns how many new facts were written."""
+        stored = 0
+        for kind, sentence in extract_facts(text):
+            if self.remember(ledger, session_id, kind, sentence):
+                stored += 1
+        return stored
+
+    def recall(self, ledger, query=None, kind=None, limit=20):
+        """Cold-tier recall: newest durable facts first, optionally
+        filtered by keyword or kind."""
+        return ledger.facts(kind=kind, query=query, limit=limit)
+
+    def episodes(self, ledger, limit=20):
+        """Warm tier: past sessions as tagged episodes."""
+        return ledger.sessions(limit=limit)
+
+    def tag_episode(self, ledger, session_id: int, tag: str) -> None:
+        ledger.tag_session(session_id, tag)

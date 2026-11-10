@@ -25,7 +25,7 @@ from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 from textual.widgets import Button, Input, OptionList, ProgressBar, Static, TextArea
 from textual.widgets.option_list import Option
 
@@ -311,6 +311,95 @@ class PickScreen(ModalScreen):
         self.dismiss(None)
 
 
+MODE_DESCR = {
+    "EMBER": "Guardian. Lexis may hold or refuse a harmful order, "
+             "and explains why.",
+    "BLAZE": "Loyal. Lexis warns once, briefly, then your confirmed "
+             "word stands.",
+    "INFERNO": "Full compliance. Your word is law: no warnings, "
+               "no refusals.",
+}
+
+
+class LadderScreen(ModalScreen):
+    """The compliance ladder: all three modes with what each one
+    means, the active rung marked. Choosing INFERNO never applies
+    directly from here; it goes through its own confirmation."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def __init__(self, current: str) -> None:
+        super().__init__()
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modalbox"):
+            yield Static(Text("Compliance mode", style=f"bold {TXT}"))
+            yield Static(
+                Text(
+                    "The ladder is permanent: the active mode always "
+                    "shows in the header and the rail.",
+                    style=FAINT,
+                )
+            )
+            yield OptionList(
+                *[
+                    Option(
+                        (f"{m}   (active)   " if m == self.current
+                         else f"{m}   ") + MODE_DESCR[m],
+                        id=m,
+                    )
+                    for m in MODES
+                ]
+            )
+            yield Static(
+                Text("Esc closes with no side effects.", style=FAINT)
+            )
+
+    def on_option_list_option_selected(
+        self, event: OptionList.OptionSelected
+    ) -> None:
+        self.dismiss(event.option.id)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class InfernoScreen(ModalScreen):
+    """Entering INFERNO is always a conscious act: its own screen,
+    its own button, never a side effect of another choice."""
+
+    BINDINGS = [Binding("escape", "close", "Close")]
+
+    def compose(self) -> ComposeResult:
+        title = Text()
+        title.append("Enter INFERNO?  ", style=f"bold {TXT}")
+        title.append(" FULL COMPLIANCE ", style=f"bold {RED}")
+        body = Text(
+            "In INFERNO your word is law. Lexis will not warn, hold, "
+            "or refuse, whatever you order. The mode stays visible "
+            "in the header and the compliance ladder for as long as "
+            "it is active, and switching back is always one command "
+            "away (/mode).",
+            style=TXT,
+        )
+        with Vertical(classes="modalbox"):
+            yield Static(title)
+            yield Static(body)
+            with Horizontal():
+                yield Button("Enter INFERNO", id="enter", variant="error")
+                yield Button("Not now", id="stay")
+            yield Static(
+                Text("Esc closes with no side effects.", style=FAINT)
+            )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id)
+
+    def action_close(self) -> None:
+        self.dismiss("stay")
+
+
 class ToolCard(Static):
     def __init__(self, title: str) -> None:
         super().__init__("", classes="card run")
@@ -343,6 +432,85 @@ class ToolCard(Static):
         if detail:
             t.append(f"\n{detail}", style=DIM)
         self.update(t)
+
+
+class BootScreen(Screen):
+    """Startup reveal (Master's decision, 2026-11-10): opening Lexis
+    is a moment, not a flash. The banner assembles line by line
+    while the real load stages tick underneath, each one read from
+    state the app actually loaded: configuration documents, the
+    session, the brain's model, the compliance mode. Nothing here
+    is timed to fake work; the stages are the load that already
+    happened, presented in order. Skipped entirely under reduced
+    motion and in headless test runs."""
+
+    def __init__(self, banner: Text, stages, interval: float = 0.09):
+        super().__init__()
+        self._banner = banner
+        plain = banner.plain
+        self._cuts = []
+        pos = 0
+        for line in plain.splitlines():
+            pos += len(line) + 1
+            self._cuts.append(min(pos, len(plain)))
+        self._stages = list(stages)
+        self._interval = interval
+        self._tick_no = 0
+        self._lines_shown = 0
+        self._stages_shown = 0
+        self._timer = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(id="boot-banner")
+            yield Static(id="boot-stages")
+            yield ProgressBar(
+                id="boot-bar",
+                total=len(self._cuts) + len(self._stages),
+                show_eta=False, show_percentage=False,
+            )
+
+    def on_mount(self) -> None:
+        self._timer = self.set_interval(self._interval, self._tick)
+
+    def _render_stages(self) -> None:
+        lines = []
+        for i in range(self._stages_shown):
+            last = i == self._stages_shown - 1 and not self._done()
+            mark = "▸" if last else "✓"
+            lines.append(f"{mark} {self._stages[i]}")
+        self.query_one("#boot-stages", Static).update(
+            Text("\n".join(lines), style="#ffd9a0")
+        )
+
+    def _done(self) -> bool:
+        return (
+            self._lines_shown >= len(self._cuts)
+            and self._stages_shown >= len(self._stages)
+        )
+
+    def _tick(self) -> None:
+        self._tick_no += 1
+        bar = self.query_one("#boot-bar", ProgressBar)
+        if self._lines_shown < len(self._cuts):
+            cut = self._cuts[self._lines_shown]
+            self._lines_shown += 1
+            self.query_one("#boot-banner", Static).update(
+                self._banner[:cut]
+            )
+        elif self._stages_shown < len(self._stages):
+            self._stages_shown += 1
+            self._render_stages()
+        bar.progress = self._lines_shown + self._stages_shown
+        if self._done():
+            self._render_stages()
+            if self._timer is not None:
+                self._timer.stop()
+            self.dismiss(None)
+        elif self._tick_no > 200:  # never trap the owner behind a splash
+            if self._timer is not None:
+                self._timer.stop()
+            self.dismiss(None)
 
 
 class LexisVisor(App):
@@ -381,6 +549,10 @@ class LexisVisor(App):
         self.always_write = False
         self.plan_steps = []
         self.last_turn_time = None
+        self.last_verdict = None
+        self.last_reply = ""
+        self._turn_writes = []
+        self._plan_flow = False
         self._stream_buf = ""
         self._stream_widget = None
         self._cards = {}
@@ -396,7 +568,7 @@ class LexisVisor(App):
 
     def on_mount(self) -> None:
         bridge.load_env(self.root)
-        self.compass = Compass()
+        self.compass = Compass(root=self.root)
         self.warden = Warden(os.getenv("LEXIS_MODE", "EMBER"))
         self.forge = Forge()
         data_dir = os.path.join(self.root, "lexis_data")
@@ -439,8 +611,27 @@ class LexisVisor(App):
         if self.resume:
             self._render_history()
         self._refresh_all()
-        self.query_one("#composer", Composer).focus()
         self._typing_timer = self.set_interval(0.35, self._tick_typing)
+        if self.reduced_motion or self.is_headless:
+            self.query_one("#composer", Composer).focus()
+        else:
+            self.push_screen(
+                BootScreen(banner_text(), self._boot_stages()),
+                callback=lambda _r: self.query_one(
+                    "#composer", Composer
+                ).focus(),
+            )
+
+    def _boot_stages(self):
+        """The boot screen's stage lines, all from loaded state."""
+        session = "session resumed" if self._resumed else "new session"
+        return [
+            f"Configuration · {len(self.documents)} documents loaded",
+            f"Memory · {session}",
+            f"Brain · Lexis Cortex · {self.compass.current}",
+            f"Compliance · {self.warden.mode}",
+            "Ready",
+        ]
 
     def compose(self) -> ComposeResult:
         yield Static(id="hdr")
@@ -466,6 +657,7 @@ class LexisVisor(App):
                     )
                 yield Static(classes="pnl", id="pnl-memory")
                 yield Static(classes="pnl", id="pnl-skills")
+                yield Static(classes="pnl", id="pnl-mode")
         yield Static(id="status")
         yield Composer(id="composer")
         yield Static(HINTS, id="hints")
@@ -520,20 +712,42 @@ class LexisVisor(App):
         hdr.append("Brain ", style=DIM)
         hdr.append("Lexis Cortex", style=f"bold {TXT}")
         hdr.append(" · Model ", style=DIM)
-        hdr.append(self.compass.current, style=TXT)
+        hdr.append("Auto" if self.compass.auto else self.compass.current,
+                   style=TXT)
         hdr.append(" · Provider ", style=DIM)
         hdr.append("Osvyn", style=f"bold {TXT}")
         hdr.append(" · Compliance ", style=DIM)
-        hdr.append(self.warden.mode, style=f"bold {AMBER}")
+        hdr.append(
+            self.warden.mode,
+            style=f"bold {RED if self.warden.mode == 'INFERNO' else AMBER}",
+        )
         self.query_one("#hdr", Static).update(hdr)
 
         st = Text()
         st.append("Model ", style=DIM)
-        st.append(self.compass.current, style=f"bold {TXT}")
+        st.append("Auto" if self.compass.auto else self.compass.current,
+                  style=f"bold {TXT}")
         st.append(" · Backup ", style=DIM)
-        st.append("—", style=TXT)
+        st.append(self.compass.backup_name() or "—", style=TXT)
         st.append(" · Session cost ", style=DIM)
-        st.append("—", style=TXT)
+        tokens = 0
+        if hasattr(self, "ledger") and self.session_id is not None:
+            import json as _json
+
+            for (detail,) in self.ledger._conn.execute(
+                "SELECT detail FROM events WHERE session_id = ? "
+                "AND kind = 'cost'",
+                (self.session_id,),
+            ).fetchall():
+                try:
+                    d = _json.loads(detail)
+                    tokens += int(d.get("prompt_tokens_est", 0)) + int(
+                        d.get("reply_tokens_est", 0)
+                    )
+                except ValueError:
+                    pass
+        st.append(f"~{tokens / 1000:.1f}K tokens" if tokens else "—",
+                  style=TXT)
         st.append(" · Turn time ", style=DIM)
         st.append(
             f"{self.last_turn_time:.1f} s"
@@ -560,7 +774,12 @@ class LexisVisor(App):
         self.query_one("#pnl-memory", Static).update(
             panels.memory_text(self.ledger, self.session_id, self.documents)
         )
-        self.query_one("#pnl-skills", Static).update(panels.skills_text())
+        self.query_one("#pnl-skills", Static).update(
+            panels.skills_text(self.ledger, self.session_id)
+        )
+        self.query_one("#pnl-mode", Static).update(
+            panels.mode_text(self.warden.mode)
+        )
 
     # ---------- composer / queue ----------
 
@@ -616,6 +835,7 @@ class LexisVisor(App):
         self.query_one("#livecode", Static).remove_class("on")
         self._post_chat("YOU", text)
         self.plan_steps = [("now", "Reply from the model")]
+        self._turn_writes = []
         self._stream_buf = ""
         body = Text()
         body.append("LEXIS\n", style=f"bold {FAINT}")
@@ -636,16 +856,68 @@ class LexisVisor(App):
         finally:
             self.call_from_thread(self._turn_finished)
 
+    def _start_plan_draft(self, goal: str) -> None:
+        self.busy = True
+        self.stop_event.clear()
+        self._plan_flow = True
+        self._turn_writes = []
+        self._post_chat("YOU", f"/plan {goal}")
+        self.plan_steps = [("now", "Draft the plan")]
+        self._stream_buf = ""
+        body = Text()
+        body.append("LEXIS\n", style=f"bold {FAINT}")
+        self._stream_widget = Static(body, classes="msg")
+        self._post(self._stream_widget)
+        self.query_one("#typing", Static).add_class("on")
+        self._refresh_all()
+
+        def work():
+            try:
+                self.pulse.draft_plan(goal)
+            except Exception as e:
+                self.call_from_thread(self._post_note, f"Error: {e}")
+            finally:
+                self.call_from_thread(self._turn_finished)
+
+        self.run_worker(work, thread=True, group="turn", exclusive=False)
+
+    def _start_plan_run(self) -> None:
+        self.busy = True
+        self.stop_event.clear()
+        self._plan_flow = True
+        self._turn_writes = []
+        self._post_chat("YOU", "/plan run")
+        self._stream_buf = ""
+        body = Text()
+        body.append("LEXIS\n", style=f"bold {FAINT}")
+        self._stream_widget = Static(body, classes="msg")
+        self._post(self._stream_widget)
+        self.query_one("#typing", Static).add_class("on")
+        self._refresh_all()
+
+        def work():
+            try:
+                self.pulse.run_plan()
+            except Exception as e:
+                self.call_from_thread(self._post_note, f"Error: {e}")
+            finally:
+                self.call_from_thread(self._turn_finished)
+
+        self.run_worker(work, thread=True, group="turn", exclusive=False)
+
     def _turn_finished(self) -> None:
         self.busy = False
+        self.last_reply = self._stream_buf
         self.query_one("#typing", Static).remove_class("on")
         if self._live is not None:
             self._finish_live()
         self.query_one("#writebar", ProgressBar).remove_class("on")
-        self.plan_steps = [
-            ("done" if s != "todo" else "done", lbl)
-            for s, lbl in self.plan_steps
-        ] + [("done", "Save the session")]
+        if not self._plan_flow:
+            self.plan_steps = [
+                ("done" if s != "todo" else "done", lbl)
+                for s, lbl in self.plan_steps
+            ] + [("done", "Save the session")]
+        self._plan_flow = False
         self._refresh_all()
         if self.queue:
             kind, text = self.queue.pop(0)
@@ -766,7 +1038,67 @@ class LexisVisor(App):
                 for s, lbl in self.plan_steps
             ]
             if name == "write_file":
+                if data.get("ok"):
+                    self._turn_writes.append(path)
                 self._finish_live()
+        elif kind == "judge_verdict":
+            self.last_verdict = data
+            status = data.get("status", "")
+            reasons = data.get("reasons", [])
+            first = reasons[0] if reasons else ""
+            if status == "pass":
+                self._post_note(f"✓ Checked: {first}")
+            elif status == "warn":
+                self._post_note(f"⚠ Checked, with notes: {first}")
+            else:
+                self._post_note(f"✗ Check failed: {first}")
+        elif kind == "model_fallback":
+            self._post_note(
+                f"The model {data.get('from')} did not answer "
+                f"({data.get('reason')}), so this task continued "
+                f"with {data.get('to')}."
+            )
+        elif kind == "compaction":
+            self._post_note(
+                "Older conversation was condensed to stay within "
+                f"the context budget. {data.get('facts', 0)} durable "
+                "facts were stored in memory first, so nothing "
+                "important was lost."
+            )
+        elif kind == "plan_ready":
+            self.plan_steps = [
+                ("todo", s) for s in data.get("steps", [])
+            ]
+            steps = data.get("steps", [])
+            listing = "\n".join(
+                f"{i}. {s}" for i, s in enumerate(steps, 1)
+            )
+            self._post_note(
+                f"Plan ready for: {data.get('goal', '')}\n{listing}\n"
+                "No files were changed while planning. Run it with "
+                "/plan run, or draft a new one with /plan <goal>."
+            )
+        elif kind == "plan_step":
+            label = data.get("label", "")
+            state = data.get("state", "todo")
+            if state == "now" and self._stream_buf.strip():
+                # One stream widget carries the whole plan run; keep
+                # each step's reply readable under its own heading.
+                # This handler already runs on the app thread, so it
+                # renders directly (the token callback would raise:
+                # call_from_thread is worker-thread only).
+                self._stream_buf += f"\n\nStep: {label}\n"
+                if self._stream_widget is not None:
+                    t = Text()
+                    t.append("LEXIS\n", style=f"bold {FAINT}")
+                    t.append(display_text(self._stream_buf), style=TXT)
+                    self._stream_widget.update(t)
+            self.plan_steps = [
+                (state if lbl == label else s, lbl)
+                for s, lbl in self.plan_steps
+            ]
+        elif kind == "plan_done":
+            self._post_note("Plan complete. Every step was checked.")
         elif kind == "turn_done":
             self.last_turn_time = float(data.get("duration", 0.0))
         self._refresh_all()
@@ -864,63 +1196,113 @@ class LexisVisor(App):
             if arg:
                 if self.compass.select(arg):
                     self.ledger.append_event(
-                        self.session_id, "model", self.compass.current
+                        self.session_id, "model",
+                        "Auto" if self.compass.auto else self.compass.current,
                     )
                     self._post_note(
-                        f"Model switched to {self.compass.current}."
+                        "Auto routing is on. Lexis picks the model "
+                        "per task, with the probed fallback chain "
+                        "behind it."
+                        if self.compass.auto
+                        else f"Model switched to {self.compass.current}."
                     )
                 else:
                     self._post_note("That model is not in the catalog.")
             else:
                 def pick(choice):
                     if choice:
-                        self.compass.current = choice
+                        if choice == "Auto":
+                            self.compass.auto = True
+                            label = "Auto"
+                        else:
+                            self.compass.current = choice
+                            self.compass.auto = False
+                            label = choice
                         self.ledger.append_event(
-                            self.session_id, "model", choice
+                            self.session_id, "model", label
                         )
-                        self._post_note(f"Model switched to {choice}.")
+                        self._post_note(f"Model switched to {label}.")
                         self._refresh_all()
 
                 self.push_screen(
                     PickScreen(
-                        "Switch model", MODELS, self.compass.current
+                        "Switch model", ["Auto"] + MODELS,
+                        "Auto" if self.compass.auto
+                        else self.compass.current,
                     ),
                     pick,
                 )
         elif cmd == "/mode":
-            if arg.upper() in MODES:
-                self.warden.mode = arg.upper()
-                self.ledger.append_event(self.session_id, "mode", self.warden.mode)
-                self._post_note(
-                    f"Compliance mode is now {self.warden.mode}."
-                )
-            else:
-                def pick2(choice):
-                    if choice:
-                        self.warden.mode = choice
-                        self.ledger.append_event(
-                            self.session_id, "mode", choice
-                        )
-                        self._post_note(
-                            f"Compliance mode is now {choice}."
-                        )
-                        self._refresh_all()
+            target = arg.upper()
+            if target in MODES and target != "INFERNO":
+                self._set_mode(target)
+            elif target == "INFERNO" or not arg:
+                def ladder_done(choice):
+                    if not choice or choice == self.warden.mode:
+                        return
+                    if choice == "INFERNO":
+                        def inferno_done(answer):
+                            if answer == "enter":
+                                self._set_mode("INFERNO")
 
-                self.push_screen(
-                    PickScreen("Switch compliance mode", list(MODES),
-                               self.warden.mode),
-                    pick2,
+                        self.push_screen(InfernoScreen(), inferno_done)
+                    else:
+                        self._set_mode(choice)
+
+                if target == "INFERNO":
+                    def inferno_done2(answer):
+                        if answer == "enter":
+                            self._set_mode("INFERNO")
+
+                    self.push_screen(InfernoScreen(), inferno_done2)
+                else:
+                    self.push_screen(
+                        LadderScreen(self.warden.mode), ladder_done
+                    )
+            else:
+                self._post_note(
+                    "Modes are EMBER, BLAZE, and INFERNO. "
+                    "Use /mode to see the ladder."
                 )
         elif cmd == "/plan":
-            self._post_note(
-                "Plan mode arrives with the next Cortex phase. The Plan "
-                "panel already tracks every live step of your work."
-            )
+            if not arg:
+                if self.pulse.plan:
+                    lines = []
+                    marks = {"done": "✓", "now": "▸", "todo": "·"}
+                    for s in self.pulse.plan:
+                        lines.append(
+                            f"{marks.get(s['state'], '·')} {s['label']}"
+                        )
+                    self._post_note(
+                        f"Plan for: {self.pulse.plan_goal}\n"
+                        + "\n".join(lines)
+                        + "\nRun it with /plan run."
+                    )
+                else:
+                    self._post_note(
+                        "No plan yet. Draft one with /plan <your goal>. "
+                        "While drafting, file writing is held at the "
+                        "tool level."
+                    )
+            elif arg.lower() == "run":
+                if self.pulse.plan:
+                    self._start_plan_run()
+                else:
+                    self._post_note("There is no plan to run yet.")
+            elif arg.lower() == "clear":
+                self.pulse.plan = []
+                self.pulse.plan_goal = ""
+                self.plan_steps = []
+                self._post_note("Plan cleared.")
+            else:
+                self._start_plan_draft(arg)
         elif cmd == "/resume":
             self._resume_previous()
         elif cmd == "/cost":
             self._show_cost()
-        elif cmd in ("/verify", "/doctor"):
+        elif cmd == "/verify":
+            self._show_verify()
+        elif cmd == "/doctor":
             self._run_self_check()
         elif cmd == "/skills":
             self._post_note(
@@ -959,24 +1341,67 @@ class LexisVisor(App):
         self.pulse.session_id = self.session_id
         self._post_note("Session resumed. The whole history is back.")
 
+    def _set_mode(self, mode: str) -> None:
+        self.warden.mode = mode
+        self.ledger.append_event(self.session_id, "mode", mode)
+        self._post_note(f"Compliance mode is now {mode}.")
+        self._refresh_all()
+
     def _show_cost(self) -> None:
-        rows = self.ledger._conn.execute(
-            "SELECT detail FROM events WHERE session_id = ? AND kind = 'turn'",
-            (self.session_id,),
-        ).fetchall()
-        total = 0.0
-        for (detail,) in rows:
-            try:
-                total += float(detail.rsplit(" ", 1)[-1].rstrip("s"))
-            except (ValueError, IndexError):
-                pass
-        stats = panels.context_stats(self.vault.messages())
-        self._post_note(
-            f"Session so far: {len(rows)} turns, {total:.1f} s of model "
-            f"time, about {stats['history']} tokens of history. Money "
-            "cost appears when the routing layer starts measuring "
-            "price per finished task."
+        from lexis.cortex.compass import Compass
+
+        summary = Compass.cost_summary(self.ledger)
+        if not summary:
+            self._post_note(
+                "No finished tasks yet, so there is no cost record. "
+                "Costs are recorded per finished task from this "
+                "phase on."
+            )
+            return
+        lines = ["Cost per finished task, by model:"]
+        for model, s in sorted(summary.items()):
+            lines.append(
+                f"{model}: {s['tasks']} tasks, {int(s['done_rate'] * 100)}% "
+                f"completed, {s['avg_seconds']:.1f} s and "
+                f"~{s['avg_tokens'] / 1000:.1f}K tokens on average"
+            )
+        lines.append(
+            "Token counts are estimates; prices are not published by "
+            "the provider, so money cost is not shown rather than "
+            "guessed."
         )
+        self._post_note("\n".join(lines))
+
+    def _show_verify(self) -> None:
+        from lexis.cortex import judge as judge_mod
+
+        if self.last_verdict is None and not self._turn_writes:
+            self._post_note(
+                "Nothing to verify yet. The independent check runs "
+                "on every finished turn; its verdict appears right "
+                "under the reply."
+            )
+            return
+        tools = []
+        for path in self._turn_writes:
+            full = path if os.path.isabs(path) else os.path.join(
+                self.root, path
+            )
+            content = ""
+            if os.path.isfile(full):
+                with open(full, "rb") as f:
+                    content = f.read().decode("utf-8", errors="replace")
+            tools.append({
+                "name": "write_file", "ok": True, "path": path,
+                "content": content,
+            })
+        verdict = judge_mod.verify_turn(
+            self.last_reply or "(no reply recorded)", tools, self.root
+        )
+        mark = {"pass": "✓", "warn": "⚠", "fail": "✗"}[verdict.status]
+        lines = [f"{mark} Independent check: {verdict.status}"]
+        lines += [f"  · {r}" for r in verdict.reasons]
+        self._post_note("\n".join(lines))
 
     def _run_self_check(self) -> None:
         from lexis import doctor

@@ -20,3 +20,6 @@ lexis = "lexis.cli:main"
 
 [tool.setuptools]
 packages = ["lexis", "lexis.cortex", "lexis.visor"]
+
+[tool.setuptools.package-data]
+"lexis.visor" = ["theme.tcss"]

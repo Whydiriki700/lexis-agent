@@ -23,12 +23,17 @@ class Warden:
     def __init__(self, mode: str = "EMBER") -> None:
         mode = (mode or "EMBER").upper()
         self.mode = mode if mode in MODES else "EMBER"
+        # Plan mode (Fase 3): while a plan is being drafted, writes
+        # are denied at the tool level in every compliance mode.
+        self.planning = False
 
     def decide(self, risk: str) -> str:
         """risk is 'read' or 'write' in Fase 1."""
         if risk == "read":
             return ALLOW
         if risk == "write":
+            if self.planning:
+                return DENY
             if self.mode == "INFERNO":
                 return ALLOW
             return ASK

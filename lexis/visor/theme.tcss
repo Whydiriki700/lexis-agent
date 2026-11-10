@@ -187,3 +187,22 @@ ProgressBar > .bar--bar {
 ProgressBar > .bar--complete {
     background: $amber;
 }
+
+BootScreen {
+    background: #0c0a08;
+    align: center middle;
+}
+
+BootScreen Vertical {
+    width: auto;
+    height: auto;
+}
+
+#boot-stages {
+    margin-top: 1;
+}
+
+#boot-bar {
+    width: 64;
+    margin-top: 1;
+}

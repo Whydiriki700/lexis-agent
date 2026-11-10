@@ -4,16 +4,28 @@
 
 Fase 1 reproduces the original main.py turn semantics exactly, split
 behind a small interface: stream the reply, filter thinking tags,
-then run the file tools found in the reply. The surface (CLI, later
-Visor) injects how tokens are shown, how lines are printed, and how
+then run the file tools found in the reply. The surface (CLI, Visor)
+injects how tokens are shown, how lines are printed, and how
 permission questions are asked, so the loop is testable headlessly.
+
+Fase 3 keeps those semantics and adds the Cortex behaviour around
+them: owner statements are lifted into cold-tier facts, the context
+is compacted by prism at the budget trigger, a turn falls back along
+the compass chain when a model errors or answers empty (only before
+any token reaches the user, so a reply is never doubled), every
+finished turn is judged and costed into the ledger, and plan mode
+drafts under a tool-level write ban, then executes step by step.
 """
 
+import json
+import re
 import time
 
 from . import bridge
 from . import forge as forge_mod
-from .warden import ALLOW, ASK
+from . import judge as judge_mod
+from . import prism
+from .warden import ALLOW, ASK, DENY
 
 
 class ThinkFilter:
@@ -40,6 +52,28 @@ class ThinkFilter:
         return ""
 
 
+_STEP_MARK = re.compile(r"^[-*•]\s*|^\d+[.)]\s*")
+
+
+def parse_plan(reply: str, goal: str):
+    """Pull plan steps out of a model reply: one step per line,
+    bullets and numbering stripped. Falls back to the goal itself as
+    a single step when fewer than two step-shaped lines are found:
+    a lone line is prose, not a plan."""
+    steps = []
+    for line in (reply or "").splitlines():
+        s = _STEP_MARK.sub("", line.strip()).strip()
+        if "WRITE_FILE" in s or "READ_FILE" in s:
+            continue  # tool protocol lines are not plan steps
+        if 3 <= len(s) <= 140 and not s.endswith(":"):
+            steps.append(s)
+        if len(steps) >= 12:
+            break
+    if len(steps) < 2:
+        return [goal]
+    return steps
+
+
 class Pulse:
     def __init__(self, root, compass, vault, forge, warden, ledger,
                  session_id, emit_token, emit_line, ask,
@@ -57,10 +91,33 @@ class Pulse:
         self.on_first_token = on_first_token or (lambda: None)
         self.on_event = on_event
         self.should_stop = should_stop
+        self.plan = []
+        self.plan_goal = ""
+        self._turn_tools = []
 
     def _event(self, kind: str, data: dict) -> None:
         if self.on_event is not None:
             self.on_event(kind, data)
+
+    def _finish(self, outcome, started, model_used, prompt_tokens, full):
+        """Judge and cost every finished turn into the ledger."""
+        duration = time.time() - started
+        if outcome in ("done", "file_read"):
+            verdict = judge_mod.verify_turn(full, self._turn_tools, self.root)
+            self.ledger.append_event(
+                self.session_id, "judge",
+                f"{verdict.status}: " + "; ".join(verdict.reasons),
+            )
+            self._event("judge_verdict", {
+                "status": verdict.status, "reasons": verdict.reasons,
+            })
+        self.ledger.record_cost(
+            self.session_id, model_used, duration,
+            prompt_tokens, len(full) // 4, outcome,
+        )
+        self._event("turn_done", {
+            "duration": duration, "outcome": outcome,
+        })
 
     def handle_turn(self, user_text: str) -> str:
         """Run one user turn. Returns 'done' or 'file_read', mirroring
@@ -68,36 +125,75 @@ class Pulse:
         waits for the next user input without storing the reply)."""
         self.vault.add("user", user_text)
         self.ledger.append_message(self.session_id, "user", user_text)
+        learned = self.vault.learn_from(self.ledger, self.session_id, user_text)
+        if learned:
+            self.ledger.append_event(
+                self.session_id, "facts", f"{learned} stored"
+            )
+        if prism.needs_compaction(self.vault.messages()):
+            report = prism.compact(self.vault, self.ledger, self.session_id)
+            if report:
+                self._event("compaction", report)
+        self._turn_tools = []
         started = time.time()
-        self._event("turn_started", {"model": self.compass.current})
+        messages = self.vault.messages()
+        prompt_tokens = prism.estimate_tokens(messages)
+        model_used = self.compass.route(user_text)
+        self._event("turn_started", {"model": model_used})
         api_key = bridge.current_key(self.root)
 
         full = ""
-        think = ThinkFilter()
-        first = True
+        got_any = False
         cancelled = False
-        for delta in bridge.stream_chat(
-            self.compass.current, self.vault.messages(), api_key
-        ):
-            if self.should_stop is not None and self.should_stop():
-                cancelled = True
+        chain = self.compass.chain(model_used)
+        for attempt_no, model in enumerate(chain):
+            model_used = model
+            think = ThinkFilter()
+            attempt_full = ""
+            attempt_got = False
+            try:
+                for delta in bridge.stream_chat(model, messages, api_key):
+                    if self.should_stop is not None and self.should_stop():
+                        cancelled = True
+                        break
+                    if not attempt_got and not got_any:
+                        self.on_first_token()
+                    attempt_got = True
+                    attempt_full += delta
+                    visible = think.feed(delta)
+                    if visible:
+                        self.emit_token(visible)
+            except Exception:
+                if attempt_got:
+                    # A partial reply is already on screen: it stands.
+                    full = attempt_full
+                    got_any = True
+                    break
+                if attempt_no + 1 < len(chain):
+                    self._event("model_fallback", {
+                        "from": model, "to": chain[attempt_no + 1],
+                        "reason": "model error",
+                    })
+                    continue
+                raise
+            full = attempt_full
+            got_any = attempt_got
+            if cancelled or got_any:
                 break
-            if first:
-                self.on_first_token()
-                first = False
-            full += delta
-            visible = think.feed(delta)
-            if visible:
-                self.emit_token(visible)
+            if attempt_no + 1 < len(chain):
+                self._event("model_fallback", {
+                    "from": model, "to": chain[attempt_no + 1],
+                    "reason": "empty reply",
+                })
+                continue
+            break
         self.emit_line("\n")
 
         if cancelled:
             self.vault.add("assistant", full)
             self.ledger.append_message(self.session_id, "assistant", full)
             self.ledger.append_event(self.session_id, "turn", "cancelled")
-            self._event("turn_done", {
-                "duration": time.time() - started, "outcome": "cancelled",
-            })
+            self._finish("cancelled", started, model_used, prompt_tokens, full)
             return "cancelled"
 
         read_path = forge_mod.find_read_marker(full)
@@ -108,11 +204,15 @@ class Pulse:
                 })
                 t0 = time.time()
                 content = self.forge.call("read_file", path=read_path)
+                detail = (f"{content.count(chr(10)) + 1} lines · "
+                          f"{len(content.encode('utf-8'))} bytes")
                 self._event("tool_end", {
                     "name": "read_file", "path": read_path, "ok": True,
-                    "detail": f"{content.count(chr(10)) + 1} lines · "
-                              f"{len(content.encode('utf-8'))} bytes",
-                    "duration": time.time() - t0,
+                    "detail": detail, "duration": time.time() - t0,
+                })
+                self._turn_tools.append({
+                    "name": "read_file", "ok": True, "path": read_path,
+                    "detail": detail,
                 })
                 self.emit_line(f"  [SISTEM: Membaca file '{read_path}']")
                 result_msg = f"[HASIL BACA FILE {read_path}]:\n{content}"
@@ -122,14 +222,17 @@ class Pulse:
                 self.ledger.append_event(
                     self.session_id, "tool", "read_file " + read_path
                 )
-                self._event("turn_done", {
-                    "duration": time.time() - started, "outcome": "file_read",
-                })
+                self._finish("file_read", started, model_used,
+                             prompt_tokens, full)
                 return "file_read"
             except Exception as e:
                 self._event("tool_end", {
                     "name": "read_file", "path": read_path, "ok": False,
                     "detail": str(e), "duration": 0.0,
+                })
+                self._turn_tools.append({
+                    "name": "read_file", "ok": False, "path": read_path,
+                    "detail": str(e),
                 })
                 self.emit_line(f"  [SISTEM ERROR: {e}]\n")
 
@@ -142,32 +245,54 @@ class Pulse:
                     "name": "write_file", "path": path, "content": content,
                 })
                 decision = self.warden.decide(self.forge.risk_of("write_file"))
-                allowed = False
-                if decision == ALLOW:
-                    allowed = True
-                elif decision == ASK:
-                    allowed = self.ask("  Izinkan? (y/n): ").lower() == "y"
-                if allowed:
-                    self._event("tool_start", {
-                        "name": "write_file", "path": path, "content": content,
-                    })
-                    t0 = time.time()
-                    self.forge.call("write_file", path=path, content=content)
-                    self._event("tool_end", {
-                        "name": "write_file", "path": path, "ok": True,
-                        "detail": f"{len(content.encode('utf-8'))} bytes written",
-                        "duration": time.time() - t0,
-                    })
-                    self.emit_line(f"  [SISTEM: File '{path}' ditulis!]\n")
-                    self.ledger.append_event(
-                        self.session_id, "tool", "write_file " + path
-                    )
-                else:
+                if decision == DENY:
                     self._event("tool_end", {
                         "name": "write_file", "path": path, "ok": False,
-                        "detail": "not approved", "duration": 0.0,
+                        "detail": "held by plan mode", "duration": 0.0,
                     })
-                    self.emit_line("  [SISTEM: Dibatalkan.]\n")
+                    self._turn_tools.append({
+                        "name": "write_file", "ok": False, "path": path,
+                        "detail": "held by plan mode",
+                    })
+                    self.emit_line(
+                        "  [SISTEM: Mode rencana aktif: penulisan ditahan.]\n"
+                    )
+                else:
+                    allowed = False
+                    if decision == ALLOW:
+                        allowed = True
+                    elif decision == ASK:
+                        allowed = self.ask("  Izinkan? (y/n): ").lower() == "y"
+                    if allowed:
+                        self._event("tool_start", {
+                            "name": "write_file", "path": path,
+                            "content": content,
+                        })
+                        t0 = time.time()
+                        self.forge.call("write_file", path=path, content=content)
+                        detail = f"{len(content.encode('utf-8'))} bytes written"
+                        self._event("tool_end", {
+                            "name": "write_file", "path": path, "ok": True,
+                            "detail": detail, "duration": time.time() - t0,
+                        })
+                        self._turn_tools.append({
+                            "name": "write_file", "ok": True, "path": path,
+                            "content": content, "detail": detail,
+                        })
+                        self.emit_line(f"  [SISTEM: File '{path}' ditulis!]\n")
+                        self.ledger.append_event(
+                            self.session_id, "tool", "write_file " + path
+                        )
+                    else:
+                        self._event("tool_end", {
+                            "name": "write_file", "path": path, "ok": False,
+                            "detail": "not approved", "duration": 0.0,
+                        })
+                        self._turn_tools.append({
+                            "name": "write_file", "ok": False, "path": path,
+                            "detail": "not approved",
+                        })
+                        self.emit_line("  [SISTEM: Dibatalkan.]\n")
             except Exception as e:
                 self.emit_line(f"  [SISTEM ERROR: {e}]\n")
 
@@ -175,9 +300,63 @@ class Pulse:
         self.ledger.append_message(self.session_id, "assistant", full)
         self.ledger.append_event(
             self.session_id, "turn",
-            f"{self.compass.current} {time.time() - started:.2f}s",
+            f"{model_used} {time.time() - started:.2f}s",
         )
-        self._event("turn_done", {
-            "duration": time.time() - started, "outcome": "done",
-        })
+        self._finish("done", started, model_used, prompt_tokens, full)
+        return "done"
+
+    # --- Fase 3: plan mode --------------------------------------------
+
+    def draft_plan(self, goal: str):
+        """Draft a plan for the goal under the tool-level write ban.
+        The drafting turn is a normal turn (it is judged and costed);
+        only its writes are held. Returns the list of step labels."""
+        request = (
+            "Plan this task step by step. Reply with the steps only, "
+            "one step per line, no file changes.\nTask: " + goal
+        )
+        self.warden.planning = True
+        try:
+            self.handle_turn(request)
+        finally:
+            self.warden.planning = False
+        reply = ""
+        for m in reversed(self.vault.messages()):
+            if m.get("role") == "assistant":
+                reply = m.get("content", "")
+                break
+        steps = parse_plan(reply, goal)
+        self.plan = [{"label": s, "state": "todo"} for s in steps]
+        self.plan_goal = goal
+        self.ledger.append_event(
+            self.session_id, "plan",
+            json.dumps({"goal": goal, "steps": steps}),
+        )
+        self._event("plan_ready", {"goal": goal, "steps": steps})
+        return steps
+
+    def run_plan(self) -> str:
+        """Execute the drafted plan step by step as normal turns.
+        Returns 'done', 'cancelled', or 'empty' (no plan drafted)."""
+        if not self.plan:
+            return "empty"
+        for step in self.plan:
+            if step["state"] == "done":
+                continue
+            step["state"] = "now"
+            self._event("plan_step", {
+                "label": step["label"], "state": "now",
+            })
+            outcome = self.handle_turn(step["label"])
+            if outcome == "cancelled":
+                step["state"] = "todo"
+                self._event("plan_step", {
+                    "label": step["label"], "state": "todo",
+                })
+                return "cancelled"
+            step["state"] = "done"
+            self._event("plan_step", {
+                "label": step["label"], "state": "done",
+            })
+        self._event("plan_done", {"goal": self.plan_goal})
         return "done"
