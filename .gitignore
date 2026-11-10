@@ -1,0 +1,24 @@
+# Secrets and user data: never in the repository, never in the package.
+.env
+.env.*
+config/
+*.key
+*.pem
+credentials*
+
+# Python build and test residue
+__pycache__/
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+
+# Local working files
+*.log
+notepad.txt
+probe_result.txt
+lexis_data/
+~/
+get-pip.py
+workspace/

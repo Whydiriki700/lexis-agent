@@ -1,0 +1,219 @@
+# Copyright 2026 Riki Wahyudi (Osvyn)
+# SPDX-License-Identifier: Apache-2.0
+"""Fase 1 verification suite for Lexis (stdlib unittest, no network).
+
+Run from the project root:  python -m unittest discover -s tests -v
+
+Proves: persona byte-fidelity against main.py, model catalog fidelity,
+thinking-filter parity, forge registry and marker parsing, warden gate,
+ledger persistence, vault bootstrap, and the pulse turn flow against a
+fake stream (plain reply, file read, file write allowed and denied).
+Persona content is only ever compared by hash or equality, never printed.
+"""
+
+import ast
+import hashlib
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+
+def extract_main():
+    src = (ROOT / "main.py").read_text(encoding="utf-8-sig")
+    tree = ast.parse(src)
+    system_prompt, models, default, fewshot = None, None, None, []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            name = getattr(node.targets[0], "id", "")
+            if name == "system_prompt":
+                system_prompt = ast.literal_eval(node.value)
+            elif name == "MODELS":
+                models = ast.literal_eval(node.value)
+            elif name == "current_model":
+                default = ast.literal_eval(node.value)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            func = node.value.func
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr == "append"
+                and getattr(func.value, "id", "") == "messages"
+                and node.value.args
+            ):
+                d = ast.literal_eval(node.value.args[0])
+                if isinstance(d, dict) and "role" in d:
+                    fewshot.append((d["role"], d["content"]))
+    return system_prompt, models, default, fewshot
+
+
+class TestFidelity(unittest.TestCase):
+    def test_persona_byte_identical(self):
+        sp, _, _, fs = extract_main()
+        from lexis.cortex import persona_data
+
+        self.assertEqual(persona_data.SYSTEM_PROMPT, sp)
+        self.assertEqual([tuple(x) for x in persona_data.FEWSHOT], fs)
+        self.assertEqual(
+            hashlib.sha256(persona_data.SYSTEM_PROMPT.encode()).hexdigest(),
+            hashlib.sha256(sp.encode()).hexdigest(),
+        )
+
+    def test_compass_matches_main(self):
+        _, models, default, _ = extract_main()
+        from lexis.cortex.compass import DEFAULT_MODEL, MODELS, Compass
+
+        self.assertEqual(MODELS, models)
+        self.assertEqual(len(MODELS), 21)
+        self.assertEqual(DEFAULT_MODEL, default)
+        c = Compass()
+        self.assertTrue(c.select("3"))
+        self.assertEqual(c.current, models[2])
+        self.assertTrue(c.select(models[0]))
+        self.assertFalse(c.select("model-yang-tidak-ada"))
+        self.assertFalse(c.select("99"))
+
+
+class TestThinkFilter(unittest.TestCase):
+    def test_cases(self):
+        from lexis.cortex.pulse import ThinkFilter
+
+        tf = ThinkFilter()
+        self.assertEqual(tf.feed("halo "), "halo ")
+        self.assertEqual(tf.feed("<thinking>zzz</thinking> dunia"), " dunia")
+        tf2 = ThinkFilter()
+        self.assertEqual(tf2.feed("abc<thinking>x</thinking>def"), "def")
+        tf3 = ThinkFilter()
+        self.assertEqual(tf3.feed("<thinking>belum selesai"), "")
+        self.assertEqual(tf3.feed(" lanjut</thinking>ok"), "ok")
+
+
+class TestForgeWarden(unittest.TestCase):
+    def test_forge(self):
+        from lexis.cortex import forge as fm
+        from lexis.cortex.forge import Forge
+
+        f = Forge()
+        self.assertEqual(
+            [s["name"] for s in f.schemas()], ["read_file", "write_file"]
+        )
+        self.assertTrue(all("parameters" in s for s in f.schemas()))
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "sub", "a.txt")
+            f.call("write_file", path=p, content="isi")
+            self.assertEqual(f.call("read_file", path=p), "isi")
+        self.assertEqual(
+            fm.find_read_marker("x [READ_FILE: C:\\a.txt ] y"), "C:\\a.txt"
+        )
+        self.assertEqual(
+            fm.find_write_marker("t [WRITE_FILE: b.txt] halo [/WRITE_FILE]"),
+            ("b.txt", "halo"),
+        )
+        self.assertIsNone(fm.find_read_marker("tidak ada"))
+
+    def test_warden(self):
+        from lexis.cortex.warden import ALLOW, ASK, Warden
+
+        self.assertEqual(Warden("EMBER").decide("write"), ASK)
+        self.assertEqual(Warden("EMBER").decide("read"), ALLOW)
+        self.assertEqual(Warden("BLAZE").decide("write"), ASK)
+        self.assertEqual(Warden("INFERNO").decide("write"), ALLOW)
+        self.assertEqual(Warden("sembarang").mode, "EMBER")
+
+
+class TestLedgerVault(unittest.TestCase):
+    def test_ledger_and_vault(self):
+        from lexis.cortex.ledger import Ledger
+        from lexis.cortex.vault import Vault
+
+        with tempfile.TemporaryDirectory() as d:
+            led = Ledger(os.path.join(d, "state.db"))
+            sid = led.start_session("m")
+            led.append_message(sid, "user", "halo")
+            self.assertEqual(
+                led.load_messages(sid), [{"role": "user", "content": "halo"}]
+            )
+            self.assertEqual(led.last_session_id(), sid)
+            led.register_config_doc("X.md", "abc", 3)
+            self.assertEqual(led.config_docs()[0][0], "X.md")
+            led.close()
+            v = Vault()
+            msgs = v.bootstrap()
+            self.assertEqual(msgs[0]["role"], "system")
+            self.assertEqual(len(msgs), 3)
+
+
+class TestPulseFakeStream(unittest.TestCase):
+    def test_turns(self):
+        from lexis.cortex import bridge
+        from lexis.cortex.compass import Compass
+        from lexis.cortex.forge import Forge
+        from lexis.cortex.ledger import Ledger
+        from lexis.cortex.pulse import Pulse
+        from lexis.cortex.vault import Vault
+        from lexis.cortex.warden import Warden
+
+        with tempfile.TemporaryDirectory() as d:
+            led = Ledger(os.path.join(d, "state.db"))
+
+            def build(chunks, ask_answer="y"):
+                comp = Compass()
+                vault = Vault()
+                vault.bootstrap()
+                sid = led.start_session(comp.current)
+                tokens = []
+                pulse = Pulse(
+                    d, comp, vault, Forge(), Warden("EMBER"), led, sid,
+                    emit_token=tokens.append, emit_line=lambda t: None,
+                    ask=lambda prompt: ask_answer,
+                )
+                orig = bridge.stream_chat
+                bridge.stream_chat = (
+                    lambda model, messages, key: iter(chunks)
+                )
+                try:
+                    result = pulse.handle_turn("halo")
+                finally:
+                    bridge.stream_chat = orig
+                return result, vault, tokens
+
+            result, vault, tokens = build(["halo ", "dunia"])
+            self.assertEqual(result, "done")
+            self.assertEqual("".join(tokens), "halo dunia")
+            self.assertEqual(
+                vault.messages()[-1],
+                {"role": "assistant", "content": "halo dunia"},
+            )
+
+            target = os.path.join(d, "doc.txt")
+            Path(target).write_text("ISI DOKUMEN", encoding="utf-8")
+            result, vault, _ = build([f"baik [READ_FILE: {target}]"])
+            self.assertEqual(result, "file_read")
+            self.assertTrue(
+                any("HASIL BACA FILE" in m["content"] for m in vault.messages())
+            )
+            self.assertNotEqual(vault.messages()[-1]["role"], "assistant")
+
+            out_file = os.path.join(d, "out.txt")
+            result, _, _ = build(
+                [f"[WRITE_FILE: {out_file}] konten baru [/WRITE_FILE]"]
+            )
+            self.assertEqual(result, "done")
+            self.assertEqual(
+                Path(out_file).read_text(encoding="utf-8"), "konten baru"
+            )
+            build(
+                [f"[WRITE_FILE: {out_file}] jahat [/WRITE_FILE]"],
+                ask_answer="n",
+            )
+            self.assertEqual(
+                Path(out_file).read_text(encoding="utf-8"), "konten baru"
+            )
+            led.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
