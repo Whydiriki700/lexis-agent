@@ -166,3 +166,21 @@ def glow_color(frame: int) -> str:
     palette, lerped, never snapped between stops."""
     t = _smooth(frame * 0.06) * 0.6 + _smooth(frame * 0.017) * 0.4
     return _lerp_color(0.2 + 0.8 * t)
+
+
+# One-cell status flame (Master, 2026-11-11): the ember lives
+# in the status strip itself, moving while Lexis works and
+# breathing low at idle. It is never absent: a user must be
+# able to see at a glance that the fire is lit, and whether
+# it is working or resting.
+_BUSY_FRAMES = ("▂", "▃", "▅", "▇", "▅", "▃")
+_IDLE_FRAMES = ("▁", "▁", "▂", "▁")
+
+
+def status_flame(frame: int, busy: bool,
+                 reduced: bool = False) -> str:
+    if reduced:
+        return "▂"
+    if busy:
+        return _BUSY_FRAMES[frame % len(_BUSY_FRAMES)]
+    return _IDLE_FRAMES[(frame // 6) % len(_IDLE_FRAMES)]

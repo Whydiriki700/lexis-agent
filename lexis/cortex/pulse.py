@@ -27,7 +27,19 @@ from . import bridge
 from . import forge as forge_mod
 from . import judge as judge_mod
 from . import prism
-from .warden import ALLOW, ASK, DENY
+from .warden import ALLOW, ASK, DENY, WARN
+
+# The phase contract (inter-tab discussion, 2026-11-10): the
+# agent's work phase is DATA, emitted by Pulse as a "phase"
+# event on every transition. Surfaces render the phase; they
+# never derive it locally. A session rests at low-idle, a turn
+# moves thinking -> typing, tools run under working, an owner
+# question holds the turn at held-for-approval, and every
+# finished turn settles through dimming.
+PHASES = (
+    "low-idle", "thinking", "typing", "working",
+    "held-for-approval", "dimming",
+)
 
 CATALOG_MARK = "[SISTEM: Tool tambahan Lexis."
 
@@ -101,8 +113,16 @@ def parse_plan(reply: str, goal: str):
 class Pulse:
     def __init__(self, root, compass, vault, forge, warden, ledger,
                  session_id, emit_token, emit_line, ask,
-                 on_first_token=None, on_event=None, should_stop=None) -> None:
+                 on_first_token=None, on_event=None, should_stop=None,
+                 workdir=None) -> None:
         self.root = root
+        # Option B (Master, 2026-11-11): every tool path and
+        # command resolves against the folder Lexis was
+        # launched from, like any coding agent. The profile
+        # home (root) keeps only Lexis's own data: ledger,
+        # skills, providers, keys.
+        self.workdir = workdir if workdir is not None \
+            else os.getcwd()
         self.compass = compass
         self.vault = vault
         self.forge = forge
@@ -124,10 +144,29 @@ class Pulse:
         # catalog injection when present.
         self.skills = None
         self._catalog_sent = False
+        self.phase = "low-idle"
 
     def _event(self, kind: str, data: dict) -> None:
         if self.on_event is not None:
             self.on_event(kind, data)
+
+    def _set_phase(self, name: str) -> None:
+        """Move the work phase and emit it as data. Only real
+        transitions emit; a repeated phase is silent."""
+        if name == self.phase or name not in PHASES:
+            return
+        self.phase = name
+        self._event("phase", {"phase": name})
+
+    def _ask_owner(self, prompt: str) -> bool:
+        """Ask the owner through the injected asker, holding
+        the phase at held-for-approval for the question's
+        duration and returning to working when it resolves."""
+        self._set_phase("held-for-approval")
+        try:
+            return self.ask(prompt).lower() == "y"
+        finally:
+            self._set_phase("working")
 
     def _finish(self, outcome, started, model_used, prompt_tokens, full):
         """Judge and cost every finished turn into the ledger."""
@@ -154,12 +193,16 @@ class Pulse:
         modes, the owner. Returns 'written', or 'stopped' when the
         write was held, declined, or failed (the turn then ends,
         as the original ended it after a write decision)."""
+        path = self._abs(path)
+        risk = self.forge.risk_of("write_file")
+        decision = self.warden.decide(risk)
         try:
             self.emit_line(f"  [IZIN: Lexis ingin menulis file '{path}']")
             self._event("approval_needed", {
                 "name": "write_file", "path": path, "content": content,
+                "mode": self.warden.mode,
+                "warn_once": decision == WARN,
             })
-            decision = self.warden.decide(self.forge.risk_of("write_file"))
             if decision == DENY:
                 self._event("tool_end", {
                     "name": "write_file", "path": path, "ok": False,
@@ -176,8 +219,15 @@ class Pulse:
             allowed = False
             if decision == ALLOW:
                 allowed = True
-            elif decision == ASK:
-                allowed = self.ask("  Izinkan? (y/n): ").lower() == "y"
+            elif decision in (ASK, WARN):
+                prompt = (
+                    "  Peringatan BLAZE (satu kali untuk kelas ini): "
+                    "Izinkan dan jangan tanya lagi sesi ini? (y/n): "
+                    if decision == WARN else "  Izinkan? (y/n): "
+                )
+                allowed = self._ask_owner(prompt)
+                if allowed and decision == WARN:
+                    self.warden.note_warned(risk)
             if not allowed:
                 self._event("tool_end", {
                     "name": "write_file", "path": path, "ok": False,
@@ -189,6 +239,7 @@ class Pulse:
                 })
                 self.emit_line("  [SISTEM: Dibatalkan.]\n")
                 return "stopped"
+            self._set_phase("working")
             self._event("tool_start", {
                 "name": "write_file", "path": path,
                 "content": content,
@@ -235,7 +286,7 @@ class Pulse:
 
     def _abs(self, path: str) -> str:
         return path if os.path.isabs(path) else os.path.join(
-            self.root, path
+            self.workdir, path
         )
 
     def _run_extended_tools(self, full, started, model_used,
@@ -251,6 +302,7 @@ class Pulse:
         edit = forge_mod.find_edit_marker(full)
         if edit is not None:
             path, old, new = edit
+            path = self._abs(path)
             spec = {
                 "name": "edit_file", "risk": "write",
                 "primary": path,
@@ -267,9 +319,11 @@ class Pulse:
                 spec = {
                     "name": "run_command", "risk": "exec",
                     "primary": command, "preview": command,
+                    "stream_args": {"command": command,
+                                    "cwd": self.workdir},
                     "run": lambda: self.forge.call(
                         "run_command", command=command,
-                        cwd=self.root),
+                        cwd=self.workdir),
                     "ok_feedback": f"[HASIL PERINTAH `{command}`]:\n"
                                    "{result}",
                     "detail": "command",
@@ -281,6 +335,7 @@ class Pulse:
                 spec = {
                     "name": "run_tests", "risk": "exec",
                     "primary": path, "preview": f"tests in {path}",
+                    "stream_args": {"path": path},
                     "run": lambda: self.forge.call(
                         "run_tests", path=path),
                     "ok_feedback": f"[HASIL TES di {path}]:\n"
@@ -355,11 +410,13 @@ class Pulse:
             self.emit_line(
                 f"  [IZIN: Lexis ingin menjalankan {name} '{primary}']"
             )
+            decision = self.warden.decide(spec["risk"])
             self._event("approval_needed", {
                 "name": name, "path": primary,
                 "content": spec["preview"],
+                "mode": self.warden.mode,
+                "warn_once": decision == WARN,
             })
-            decision = self.warden.decide(spec["risk"])
             if decision == DENY:
                 self._turn_tools.append({
                     "name": name, "ok": False, "path": primary,
@@ -369,9 +426,18 @@ class Pulse:
                     "  [SISTEM: Mode rencana aktif: tool ditahan.]\n"
                 )
                 return "tool_stopped"
-            allowed = decision == ALLOW or (
-                self.ask("  Izinkan? (y/n): ").lower() == "y"
-            )
+            allowed = False
+            if decision == ALLOW:
+                allowed = True
+            elif decision in (ASK, WARN):
+                prompt = (
+                    "  Peringatan BLAZE (satu kali untuk kelas ini): "
+                    "Izinkan dan jangan tanya lagi sesi ini? (y/n): "
+                    if decision == WARN else "  Izinkan? (y/n): "
+                )
+                allowed = self._ask_owner(prompt)
+                if allowed and decision == WARN:
+                    self.warden.note_warned(spec["risk"])
             if not allowed:
                 self._turn_tools.append({
                     "name": name, "ok": False, "path": primary,
@@ -380,10 +446,21 @@ class Pulse:
                 self.emit_line("  [SISTEM: Dibatalkan.]\n")
                 return "tool_stopped"
 
+        self._set_phase("working")
         self._event("tool_start", {"name": name, "path": primary})
         t0 = time.time()
         try:
-            result = spec["run"]()
+            if spec.get("stream_args") is not None:
+                # Live output (Master, 2026-11-11): command and
+                # test lines reach the surface as they happen.
+                result = self.forge.call_stream(
+                    name,
+                    lambda line: self._event(
+                        "tool_output",
+                        {"name": name, "text": line}),
+                    **spec["stream_args"])
+            else:
+                result = spec["run"]()
         except Exception as e:
             self._event("tool_end", {
                 "name": name, "path": primary, "ok": False,
@@ -429,6 +506,7 @@ class Pulse:
         (progressive disclosure: the catalog carried only its
         name and description until now)."""
         body = self.skills.load_body(slug) if self.skills else None
+        self._set_phase("working")
         self._event("tool_start", {"name": "use_skill", "path": slug})
         if body is None:
             self._event("tool_end", {
@@ -460,6 +538,74 @@ class Pulse:
                      prompt_tokens, "")
         return "tool_done"
 
+    def evolve_skill(self, slug: str) -> dict:
+        """Draft a new skill from this session's verified work
+        (Step 3). The evidence gate runs first: without a judge
+        'pass' in this session there is nothing to distill. The
+        model writes the body; evolve.create_draft builds the
+        frontmatter and puts the draft through the registry's
+        scan, where it waits for the owner's approval."""
+        from . import evolve as evolve_mod
+
+        if self.skills is None:
+            return {"ok": False,
+                    "reason": "skill registry is not ready"}
+        ok, evidence = evolve_mod.session_evidence(
+            self.ledger, self.session_id)
+        if not ok:
+            return {
+                "ok": False,
+                "reason": "no verified success in this session "
+                          "yet: finish a task that passes "
+                          "verification first",
+            }
+        convo = [
+            m for m in self.vault.messages()
+            if m["role"] in ("user", "assistant")
+        ][-16:]
+        instruction = {
+            "role": "user",
+            "content": (
+                "Distill the verified work above into a reusable "
+                "skill for future sessions. Answer in exactly "
+                "this shape: the first line is [SKILL_DESC: a "
+                "one-line description of the general situation "
+                "this skill applies to], then the skill body in "
+                "Markdown with exactly these sections: "
+                "'## When to use it', '## The rules', "
+                "'## Worked example', '## How to check the "
+                "result'. State the rules as project-wide "
+                "conventions that hold anywhere in the project. "
+                "Preserve concrete values verbatim inside the "
+                "rules: names, tokens, markers, and exact "
+                "commands appear literally, never generalized "
+                "into placeholders like 'token X'. This "
+                "session's folder, file names, and function are "
+                "one worked example only: they belong in the "
+                "example section, labelled as an example, and "
+                "never limit the scope of the rules. Write only "
+                "the description line and the body, no preamble."
+            ),
+        }
+        api_key = bridge.current_key(self.root)
+        model = self.compass.route("draft a skill")
+        reply = ""
+        try:
+            for delta in bridge.stream_chat(
+                    model, convo + [instruction], api_key):
+                reply += delta
+        except Exception as e:
+            return {"ok": False,
+                    "reason": f"drafting call failed: {e}"}
+        description, body = evolve_mod.split_draft(
+            judge_mod.visible_text(reply))
+        if not body:
+            return {"ok": False,
+                    "reason": "the drafting reply was unusable"}
+        return evolve_mod.create_draft(
+            self.root, self.skills, self.ledger, self.session_id,
+            slug, description, body, evidence)
+
     def handle_turn(self, user_text: str) -> str:
         """Run one user turn as a completion loop: a file read or a
         successful write does not end the turn. The result is fed
@@ -487,9 +633,11 @@ class Pulse:
         while True:
             outcome = self._turn_once(user_text)
             if outcome not in ("file_read", "write_done", "tool_done"):
+                self._set_phase("dimming")
                 return outcome
             actions += 1
             if actions >= 25:
+                self._set_phase("dimming")
                 # Safety valve: the original looped reads without a
                 # cap; 25 consecutive tool actions in one turn is a
                 # runaway, so the turn ends with what it has.
@@ -500,6 +648,7 @@ class Pulse:
         'file_read', 'write_done', or 'cancelled'."""
         self._turn_tools = []
         started = time.time()
+        self._set_phase("thinking")
         messages = self.vault.messages()
         prompt_tokens = prism.estimate_tokens(messages)
         model_used = self.compass.route(user_text)
@@ -521,6 +670,7 @@ class Pulse:
                         cancelled = True
                         break
                     if not attempt_got and not got_any:
+                        self._set_phase("typing")
                         self.on_first_token()
                     attempt_got = True
                     attempt_full += delta
@@ -562,7 +712,9 @@ class Pulse:
 
         read_path = forge_mod.find_read_marker(full)
         if read_path is not None:
+            read_path = self._abs(read_path)
             try:
+                self._set_phase("working")
                 self._event("tool_start", {
                     "name": "read_file", "path": read_path,
                 })

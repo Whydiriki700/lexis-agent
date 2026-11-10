@@ -247,6 +247,50 @@ def _run(command: str, cwd: str, timeout: int, cap: int) -> str:
     return f"exit={code}\n{out}"
 
 
+def _run_stream(command: str, cwd: str, timeout: int, cap: int,
+                emit) -> str:
+    """_run with live output: every line is handed to emit()
+    the moment the process prints it, so the surface shows
+    the work as it happens instead of only at the end
+    (Master, 2026-11-11: live coding must be fully live).
+    The deadline is checked between lines; a process that
+    prints nothing can still overrun until its first line
+    or its exit. The returned string matches _run exactly."""
+    import time as _time
+
+    try:
+        proc = subprocess.Popen(
+            command, shell=True, cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, errors="replace", bufsize=1,
+            env=_scrubbed_env(),
+        )
+    except Exception as e:
+        return f"exit=error\n{e}"
+    parts = []
+    size = 0
+    deadline = _time.time() + timeout
+    timed_out = False
+    try:
+        for line in proc.stdout:
+            parts.append(line)
+            size += len(line)
+            emit(line.rstrip("\r\n"))
+            if _time.time() > deadline:
+                timed_out = True
+                proc.kill()
+                break
+    finally:
+        proc.wait()
+    out = "".join(parts)
+    code = proc.returncode
+    if timed_out:
+        return f"exit=timeout\n[Perintah melewati batas {timeout} detik.]"
+    if len(out) > cap:
+        out = out[:cap] + f"\n[Output dipotong di {cap} karakter.]"
+    return f"exit={code}\n{out}"
+
+
 def _run_command(command: str, cwd: str) -> str:
     return _run(command, cwd, timeout=60, cap=8000)
 
@@ -342,6 +386,26 @@ class Forge:
 
     def call(self, name: str, **kwargs):
         return _HANDLERS[name](**kwargs)
+
+    def call_stream(self, name: str, emit, **kwargs):
+        """Run an exec tool with its output streamed line by
+        line to emit(). Only run_command and run_tests have
+        output worth watching; anything else is a plain call."""
+        if name == "run_command":
+            return _run_stream(
+                kwargs["command"], kwargs.get("cwd") or
+                os.getcwd(), timeout=60, cap=8000, emit=emit)
+        if name == "run_tests":
+            path = kwargs["path"]
+            try:
+                import pytest  # noqa: F401
+                cmd = f'"{sys.executable}" -m pytest -q "{path}"'
+            except ImportError:
+                cmd = (f'"{sys.executable}" -m unittest discover '
+                       f'-s "{path}" -t "{path}"')
+            return _run_stream(cmd, path, timeout=300, cap=6000,
+                               emit=emit)
+        return self.call(name, **kwargs)
 
 
 def find_read_marker(text: str):

@@ -43,6 +43,7 @@ def make_pulse(root, stream, mode="INFERNO"):
         ledger.append_message(sid, m["role"], m["content"])
     pulse = Pulse(
         root, Compass(), vault, Forge(), Warden(mode), ledger, sid,
+        workdir=root,
         emit_token=lambda t: None, emit_line=lambda t: None,
         ask=lambda prompt: "y",
     )

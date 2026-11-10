@@ -39,6 +39,7 @@ def make_pulse(root, stream, mode="INFERNO", events=None):
     compass = Compass()
     pulse = Pulse(
         root, compass, vault, Forge(), Warden(mode), ledger, sid,
+        workdir=root,
         emit_token=lambda t: None,
         emit_line=lambda t: None,
         ask=lambda prompt: "y",

@@ -42,6 +42,9 @@ def plan_text(steps) -> Text:
         if state == "done":
             out.append("✓ ", style=GREEN)
             out.append(label, style=TXT)
+        elif state == "fail":
+            out.append("✗ ", style=RED)
+            out.append(label, style=TXT)
         elif state == "now":
             out.append("▸ ", style=EMBER)
             out.append(label, style=EMBER)
@@ -210,7 +213,7 @@ def _ctx_bar(pct: int, cells: int = 10) -> str:
 def status_text(*, model, provider, mode, mode_icon, conn, state_icon,
                 state_label, turn_in, turn_out, live, sess_total,
                 ctx_pct, turn_secs, queued, state_style=None,
-                width=0) -> Text:
+                width=0, folder="") -> Text:
     """The fixed status strip (Master, 2026-11-10): two lines that
     update in place and never print into the chat flow. Every value
     is live app state; token figures carry the ~ estimate mark.
@@ -250,6 +253,16 @@ def status_text(*, model, provider, mode, mode_icon, conn, state_icon,
                       (str(model), f"bold {TXT}")), True),
         ("provider", seg(("Provider ", DIM),
                          (str(provider), f"bold {TXT}")), False),
+    ]
+    if folder:
+        # The active folder (option B, Master 2026-11-11):
+        # where Lexis is working is always on the strip, and
+        # drops whole like any tail segment when narrow.
+        line1.append(
+            ("folder", seg(("Folder ", DIM), (str(folder), TXT)),
+             False)
+        )
+    line1 += [
         ("mode", seg((f"{mode_icon} {mode}", f"bold {AMBER}")), False),
         ("link", link, False),
         ("state", seg((f"{state_icon} {state_label}",

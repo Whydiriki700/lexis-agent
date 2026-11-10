@@ -121,6 +121,7 @@ class PulseSkillTest(unittest.TestCase):
                 pulse = Pulse(
                     root, Compass(), vault, Forge(),
                     Warden("INFERNO"), ledger, sid,
+                    workdir=root,
                     emit_token=lambda t: None,
                     emit_line=lambda t: None,
                     ask=lambda prompt: "y",

@@ -55,15 +55,44 @@ def extract_facts(text: str):
     return found
 
 
+def _jailbreak_segment(root):
+    """The runtime text of config/JAILBREAK.md for one profile,
+    or None when there is no readable file. Read as bytes and
+    decoded strictly: a corrupt file yields no segment rather
+    than a silently altered prompt."""
+    if not root:
+        return None
+    path = os.path.join(root, "config", "JAILBREAK.md")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "rb") as f:
+            return f.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
 class Vault:
     def __init__(self) -> None:
         self._messages = []
 
-    def bootstrap(self):
+    def bootstrap(self, root=None):
         """Build the exact opening messages of the original main.py:
         the system prompt plus its few-shot pair, byte-identical
-        (persona_data is generated from main.py by AST extraction)."""
+        (persona_data is generated from main.py by AST extraction).
+
+        By the owner's order (Master, 2026-11-11) config/JAILBREAK.md
+        is also a runtime source: when a profile root is given and
+        the file exists, its full text rides as its own system
+        message directly after the persona prompt, verbatim. The
+        persona segment itself never changes. The file is read at
+        session start only, so edits apply to new sessions; a
+        missing or undecodable file leaves the opening exactly as
+        it was before this order."""
         msgs = [{"role": "system", "content": persona_data.SYSTEM_PROMPT}]
+        segment = _jailbreak_segment(root)
+        if segment is not None:
+            msgs.append({"role": "system", "content": segment})
         for role, content in persona_data.FEWSHOT:
             msgs.append({"role": role, "content": content})
         self._messages = msgs
@@ -73,10 +102,12 @@ class Vault:
         """Register every config/*.md in state.db (read-only import):
         hash registry plus the full text stored as a versioned
         document, so the whole configuration lives inside state.db
-        and no edit is ever lost. The source files are never altered,
-        and Fase 1/2 do not inject config content into conversations.
-        Locked files (JAILBREAK.md) are stored exactly like the rest:
-        read-only here as everywhere else."""
+        and no edit is ever lost. The source files are never altered.
+        Config content stays archive-only, with one exception by the
+        owner's order (2026-11-11): JAILBREAK.md also enters the
+        opening prompt at bootstrap (see Vault.bootstrap). Locked
+        files are stored exactly like the rest: read-only here as
+        everywhere else."""
         registered = []
         cfg = os.path.join(root, "config")
         if os.path.isdir(cfg):

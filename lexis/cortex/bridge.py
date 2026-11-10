@@ -182,6 +182,39 @@ def base_url(root: str = None) -> str:
     return os.getenv(BASE_ENV, DEFAULT_BASE_URL)
 
 
+def fetch_models(root: str, timeout: int = 6):
+    """The model ids the ACTIVE provider serves, read from its
+    OpenAI-compatible /models endpoint. Returns None for the
+    legacy provider (its catalog is the built-in one) and None
+    when the endpoint cannot be read, so callers keep their
+    current catalog instead of losing every model."""
+    active = active_provider(root)
+    if active.get("legacy") or not active.get("base"):
+        return None
+    try:
+        resp = requests.get(
+            active["base"].rstrip("/") + "/models",
+            headers={"Authorization": f"Bearer {current_key(root)}"},
+            timeout=timeout,
+        )
+        data = resp.json()
+        ids = [m.get("id") for m in data.get("data", [])
+               if isinstance(m, dict) and m.get("id")]
+        return ids or None
+    except Exception:
+        return None
+
+
+# A stream that goes silent for this long is dead, not slow
+# (Master's bug, 2026-11-11: with no timeout at all, one
+# stalled connection hung a turn forever with no error, no
+# fallback, and no visible sign of life). The read timeout
+# makes a stall raise inside Pulse's attempt loop, where the
+# compass fallback chain can take over before any token, or
+# the partial reply stands after one.
+STREAM_READ_TIMEOUT = 60
+
+
 def stream_chat(model: str, messages, api_key: str):
     """Yield content deltas from a streaming chat completion.
 
@@ -195,7 +228,10 @@ def stream_chat(model: str, messages, api_key: str):
         "Content-Type": "application/json",
     }
     data = {"model": model, "messages": messages, "stream": True}
-    response = requests.post(url, headers=headers, json=data, stream=True)
+    response = requests.post(
+        url, headers=headers, json=data, stream=True,
+        timeout=(10, STREAM_READ_TIMEOUT),
+    )
     for line in response.iter_lines():
         if not line:
             continue

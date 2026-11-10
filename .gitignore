@@ -23,3 +23,7 @@ lexis_data/
 get-pip.py
 workspace/
 lexis.exe 
+
+# Runtime artifacts from local runs
+skills/
+providers.json

@@ -78,12 +78,50 @@ class Compass:
     resolves user selections exactly like the original CLI."""
 
     def __init__(self, root=None) -> None:
+        self.root = root
         self.current = DEFAULT_MODEL
         self.auto = False
         self.probe = load_probe(root)
+        self.models = list(MODELS)
+        self.catalog_source = "builtin"
+        self.refresh_models()
+
+    def refresh_models(self) -> int:
+        """Rebuild the catalog from the active provider's own
+        model list (Master's bug, 2026-11-11: a provider added
+        in-session never had its models read, and the old model
+        kept being used). Runs at startup and right after every
+        provider change, so a new provider is usable in the
+        same session. An unreadable endpoint keeps the current
+        catalog; a current model the new provider does not
+        serve is replaced by that provider's first model."""
+        if not self.root:
+            return len(self.models)
+        try:
+            from . import bridge
+
+            ids = bridge.fetch_models(self.root)
+            legacy = bool(
+                bridge.active_provider(self.root).get("legacy"))
+        except Exception:
+            ids, legacy = None, True
+        if ids:
+            chat = [m for m in ids if is_chat_model(m)]
+            self.models = chat or list(ids)
+            self.catalog_source = "provider"
+            if self.current not in self.models:
+                self.current = self.models[0]
+        elif legacy:
+            self.models = list(MODELS)
+            self.catalog_source = "builtin"
+            if self.current not in self.models:
+                self.current = DEFAULT_MODEL
+        else:
+            self.catalog_source = "provider-failed"
+        return len(self.models)
 
     def list_models(self):
-        return list(MODELS)
+        return list(self.models)
 
     def select(self, choice: str) -> bool:
         """Resolve a /model choice: a 1-based number or an exact model
@@ -92,11 +130,11 @@ class Compass:
         if choice.lower() == "auto":
             self.auto = True
             return True
-        if choice.isdigit() and 1 <= int(choice) <= len(MODELS):
-            self.current = MODELS[int(choice) - 1]
+        if choice.isdigit() and 1 <= int(choice) <= len(self.models):
+            self.current = self.models[int(choice) - 1]
             self.auto = False
             return True
-        if choice in MODELS:
+        if choice in self.models:
             self.current = choice
             self.auto = False
             return True
@@ -112,7 +150,7 @@ class Compass:
         probed chat models in catalog order. Capped at MAX_ATTEMPTS."""
         first = start or self.current
         order = [first]
-        for m in MODELS:
+        for m in self.models:
             if len(order) >= MAX_ATTEMPTS:
                 break
             if m != first and is_chat_model(m) and self.answered(m):
@@ -135,9 +173,12 @@ class Compass:
             len(text) > 600
             or any(h in text for h in _CODE_HINTS)
         )
-        if deep and self.answered(DEEP_MODEL):
+        if deep and DEEP_MODEL in self.models \
+                and self.answered(DEEP_MODEL):
             return DEEP_MODEL
-        return DEFAULT_MODEL
+        if DEFAULT_MODEL in self.models:
+            return DEFAULT_MODEL
+        return self.current
 
     @staticmethod
     def cost_summary(ledger):

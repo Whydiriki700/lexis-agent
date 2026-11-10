@@ -124,11 +124,14 @@ class TestForgeWarden(unittest.TestCase):
         self.assertIsNone(fm.find_read_marker("tidak ada"))
 
     def test_warden(self):
-        from lexis.cortex.warden import ALLOW, ASK, Warden
+        from lexis.cortex.warden import ALLOW, ASK, WARN, Warden
 
         self.assertEqual(Warden("EMBER").decide("write"), ASK)
         self.assertEqual(Warden("EMBER").decide("read"), ALLOW)
-        self.assertEqual(Warden("BLAZE").decide("write"), ASK)
+        blaze = Warden("BLAZE")
+        self.assertEqual(blaze.decide("write"), WARN)
+        blaze.note_warned("write")
+        self.assertEqual(blaze.decide("write"), ALLOW)
         self.assertEqual(Warden("INFERNO").decide("write"), ALLOW)
         self.assertEqual(Warden("sembarang").mode, "EMBER")
 
@@ -260,6 +263,7 @@ class TestPulseFakeStream(unittest.TestCase):
                 tokens = []
                 pulse = Pulse(
                     d, comp, vault, Forge(), Warden("EMBER"), led, sid,
+                    workdir=d,
                     emit_token=tokens.append, emit_line=lambda t: None,
                     ask=lambda prompt: ask_answer,
                 )

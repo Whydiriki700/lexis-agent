@@ -59,6 +59,21 @@ class Spinner:
             self._thread = None
 
 
+def _provider_note(compass, name) -> str:
+    """Refresh the catalog from the now-active provider and
+    report what was actually read (Master's bug, 2026-11-11:
+    an added provider kept the old catalog and old model)."""
+    count = compass.refresh_models()
+    if compass.catalog_source == "provider":
+        return (f"{count} model terbaca dari {name}; model "
+                f"aktif sekarang {compass.current}.")
+    if compass.catalog_source == "provider-failed":
+        return (f"Daftar model {name} tidak terbaca; katalog "
+                "lama dipertahankan.")
+    return (f"Katalog bawaan ({count} model); model aktif "
+            f"sekarang {compass.current}.")
+
+
 def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--version" in argv or "-V" in argv:
@@ -111,7 +126,7 @@ def run_chat(argv) -> int:
             vault.replace_all(ledger.load_messages(session_id))
     if session_id is None:
         session_id = ledger.start_session(compass.current)
-        for m in vault.bootstrap():
+        for m in vault.bootstrap(ROOT):
             ledger.append_message(session_id, m["role"], m["content"])
     vault.register_config(ROOT, ledger)
 
@@ -149,7 +164,7 @@ def run_chat(argv) -> int:
             if low == "/new":
                 old_id = session_id
                 session_id = ledger.start_session(compass.current)
-                vault.replace_all(vault.bootstrap())
+                vault.replace_all(vault.bootstrap(ROOT))
                 for m in vault.messages():
                     ledger.append_message(
                         session_id, m["role"], m["content"])
@@ -165,7 +180,7 @@ def run_chat(argv) -> int:
                 continue
             if low == "/model":
                 print("\nModel tersedia:")
-                for i, m in enumerate(MODELS, 1):
+                for i, m in enumerate(compass.list_models(), 1):
                     mark = " (aktif)" if m == compass.current else ""
                     print(f"  {i}. {m}{mark}")
                 pilih = input("Pilih nomor atau nama model: ").strip()
@@ -175,8 +190,7 @@ def run_chat(argv) -> int:
                 continue
             if low.startswith("/model "):
                 m = user_input.strip()[7:].strip()
-                if m in MODELS:
-                    compass.current = m
+                if compass.select(m):
                     print(f"[Model aktif: {compass.current}]\n")
                 else:
                     print("[Model tidak ditemukan]\n")
@@ -186,7 +200,8 @@ def run_chat(argv) -> int:
                 providers = bridge.list_providers(ROOT)
                 if arg:
                     if bridge.set_active_provider(ROOT, arg):
-                        print(f"[Provider aktif: {arg}]\n")
+                        print(f"[Provider aktif: {arg}. "
+                              f"{_provider_note(compass, arg)}]\n")
                     else:
                         names = ", ".join(p["name"] for p in providers)
                         print(f"[Provider tidak ditemukan. "
@@ -211,7 +226,7 @@ def run_chat(argv) -> int:
                         bridge.add_provider(ROOT, name, base, key)
                         print(f"[Provider {name} tersimpan dan "
                               "aktif. Kunci hanya disimpan di .env "
-                              "profil.]\n")
+                              f"profil. {_provider_note(compass, name)}]\n")
                     else:
                         print("[Nama dan base URL wajib diisi.]\n")
                     continue
@@ -221,7 +236,8 @@ def run_chat(argv) -> int:
                 elif any(p["name"] == pilih for p in providers):
                     chosen = pilih
                 if chosen and bridge.set_active_provider(ROOT, chosen):
-                    print(f"[Provider aktif: {chosen}]\n")
+                    print(f"[Provider aktif: {chosen}. "
+                          f"{_provider_note(compass, chosen)}]\n")
                 else:
                     print("[Pilihan tidak dikenal, tetap pakai "
                           "yang aktif.]\n")
@@ -258,6 +274,57 @@ def run_chat(argv) -> int:
                         print(f"  {i}. {s}")
                     print("Tidak ada file yang diubah selama menyusun "
                           "rencana. Ketik /plan run untuk menjalankan.\n")
+                continue
+            if low == "/evolve" or low.startswith("/evolve "):
+                slug = user_input.strip()[7:].strip()
+                if not slug:
+                    print("[Pakai: /evolve <nama-skill>. Lexis "
+                          "menyusun skill dari kerja terverifikasi "
+                          "sesi ini; draf menunggu persetujuanmu "
+                          "di /skills.]\n")
+                    continue
+                spinner.start()
+                try:
+                    result = pulse.evolve_skill(slug)
+                finally:
+                    spinner.stop()
+                if not result.get("ok"):
+                    print("[Skill tidak bisa disusun: "
+                          f"{result.get('reason', '?')}]\n")
+                elif result.get("status") == "blocked":
+                    print(f"[Draf skill {slug} DIBLOKIR pindai "
+                          "keamanan: "
+                          + ", ".join(result.get("findings", []))
+                          + ". Tidak akan pernah aktif.]\n")
+                else:
+                    print(f"[Draf skill {slug} tertulis, status "
+                          "pending. Setujui dengan /skills "
+                          f"approve {slug}.]\n")
+                continue
+            if low == "/skills" or low.startswith("/skills "):
+                registry = getattr(pulse, "skills", None)
+                if registry is None:
+                    print("[Registry skill belum siap.]\n")
+                    continue
+                registry.refresh()
+                arg = user_input.strip()[7:].strip()
+                if arg.lower().startswith("approve "):
+                    slug = arg.split(None, 1)[1].strip()
+                    if registry.approve(slug):
+                        print(f"[Skill {slug} disetujui dan "
+                              "aktif.]\n")
+                    else:
+                        print(f"[Skill {slug} tidak bisa "
+                              "disetujui: tidak dikenal atau "
+                              "diblokir pindai keamanan.]\n")
+                elif not registry.skills:
+                    print("[Belum ada skill terpasang.]\n")
+                else:
+                    for r in sorted(
+                            registry.skills.values(),
+                            key=lambda r: r["slug"]):
+                        print(f"  {r['slug']:<28} {r['status']}")
+                    print()
                 continue
             atts = attachments.scan(user_input)
             for att in atts:

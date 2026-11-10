@@ -106,5 +106,27 @@ class GlowTest(unittest.TestCase):
             self.assertTrue(c.startswith("#FF"))
 
 
+class StatusFlameTest(unittest.TestCase):
+    """The status ember (Master, 2026-11-11): always present,
+    moving while working, breathing low at idle, still under
+    reduced motion."""
+
+    def test_busy_flame_moves(self):
+        frames = {flames.status_flame(f, True)
+                  for f in range(12)}
+        self.assertGreater(len(frames), 2)
+
+    def test_idle_flame_present_and_low(self):
+        frames = {flames.status_flame(f, False)
+                  for f in range(48)}
+        self.assertTrue(frames)
+        self.assertNotIn("▇", frames)
+
+    def test_reduced_motion_is_still(self):
+        frames = {flames.status_flame(f, True, reduced=True)
+                  for f in range(12)}
+        self.assertEqual(len(frames), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

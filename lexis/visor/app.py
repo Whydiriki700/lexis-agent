@@ -79,6 +79,8 @@ PALETTE_COMMANDS = [
     ("/model", "switch model or the Auto profile", "Ctrl+M"),
     ("/provider", "switch provider or add a new endpoint + key", "—"),
     ("/skills", "manage skills: install from GitHub, create new, disable", "—"),
+    ("/evolve", "draft a new skill from this session's verified work", "—"),
+    ("/copy", "copy the last reply, or /copy all for the conversation", "Ctrl+Shift+C"),
     ("/mode", "switch compliance mode: EMBER · BLAZE · INFERNO", "Ctrl+."),
     ("/plan", "plan first, act after approval", "Ctrl+P"),
     ("/stop", "stop the current work, the flame dims to low ember", "Esc"),
@@ -156,6 +158,45 @@ _TOOL_LABELS = {
     "run_tests": "Run tests", "fetch_url": "Fetch page",
     "browse_page": "Browse page", "use_skill": "Use skill",
 }
+
+# No kitchen words on the user's surface (Master, 2026-11-11):
+# raw system errors and internal tool names are translated to
+# plain words before anything is shown. The precise originals
+# stay in the ledger, where they belong.
+_ERRNO_WORDS = (
+    ("No such file or directory", "the file does not exist"),
+    ("Permission denied", "permission denied"),
+    ("Is a directory", "that is a folder, not a file"),
+    ("Not a directory", "part of the path is not a folder"),
+    ("File exists", "the file already exists"),
+)
+
+
+def _plain_detail(detail: str) -> str:
+    d = str(detail)
+    if "Errno" in d:
+        for raw, plain in _ERRNO_WORDS:
+            if raw in d:
+                return plain
+        return "the system refused the operation"
+    return d
+
+
+def _plain_reason(reason: str) -> str:
+    r = str(reason)
+    if "Errno" in r:
+        plain = "the system refused the operation"
+        for raw, words in _ERRNO_WORDS:
+            if raw in r:
+                plain = words
+                break
+        start = r.find("(")
+        end = r.rfind(")")
+        if start != -1 and end > start:
+            r = r[:start] + f"({plain})" + r[end + 1:]
+    for name, label in _TOOL_LABELS.items():
+        r = r.replace(name, label)
+    return r
 
 
 def code_text(content: str, reveal=None, path=None) -> Syntax:
@@ -362,10 +403,12 @@ class ApprovalScreen(ModalScreen):
 
     BINDINGS = [Binding("escape", "reject", "Reject")]
 
-    def __init__(self, path: str, content: str) -> None:
+    def __init__(self, path: str, content: str,
+                 warning: str = "") -> None:
         super().__init__()
         self.path = path
         self.content = content
+        self.warning = warning
 
     def compose(self) -> ComposeResult:
         old = ""
@@ -397,6 +440,9 @@ class ApprovalScreen(ModalScreen):
         )
         with Vertical(classes="modalbox"):
             yield Static(title)
+            if self.warning:
+                yield Static(Text(self.warning,
+                                  style=f"bold {AMBER}"))
             yield Static(desc)
             if old:
                 yield Static(diff_text(old, self.content))
@@ -725,6 +771,7 @@ class LexisVisor(App):
         # ctrl+k, and the palette must win from every entry.
         Binding("ctrl+k", "palette", "Palette", priority=True),
         Binding("escape", "stop_work", "Stop"),
+        Binding("ctrl+shift+c", "copy_selection", "Copy"),
     ]
 
     def __init__(self, resume: bool = False, root=None) -> None:
@@ -806,7 +853,7 @@ class LexisVisor(App):
                 self.vault.replace_all(self.ledger.load_messages(last))
         if self.session_id is None:
             self.session_id = self.ledger.start_session(self.compass.current)
-            for m in self.vault.bootstrap():
+            for m in self.vault.bootstrap(self.root):
                 self.ledger.append_message(
                     self.session_id, m["role"], m["content"]
                 )
@@ -840,9 +887,12 @@ class LexisVisor(App):
             self._render_history()
         self._refresh_all()
         # One fine clock (~90 ms, Hermes class) drives all flame
-        # motion; it runs only while something animates.
+        # motion. It stays alive at idle too, at a whisper: the
+        # status ember breathes there (Master, 2026-11-11).
+        # Reduced motion keeps the old discipline and rests.
         self._flame_timer = self.set_interval(0.09, self._tick_flames)
-        self._flame_timer.pause()
+        if self.reduced_motion:
+            self._flame_timer.pause()
         # A short repeating check keeps the banner matched to the
         # window: it catches the first real layout and every later
         # resize without depending on event timing.
@@ -949,10 +999,26 @@ class LexisVisor(App):
 
     def _activity_running(self, label: str, target: str) -> None:
         self._activity_current = (label, target)
+        self._activity_started_at = time.time()
         t = Text(no_wrap=True, overflow="ellipsis")
         t.append("◌ ", style=EMBER)
         t.append(f"{label} · {target}", style=f"bold {TXT}")
         t.append("   running…", style=FAINT)
+        self._activity(t)
+
+    def _activity_tick(self) -> None:
+        """The running line carries its elapsed time, Hermes
+        style, so a long tool never looks frozen."""
+        cur = getattr(self, "_activity_current", None)
+        started = getattr(self, "_activity_started_at", None)
+        if not cur or started is None or self._awaiting:
+            return
+        label, target = cur
+        secs = time.time() - started
+        t = Text(no_wrap=True, overflow="ellipsis")
+        t.append("◌ ", style=EMBER)
+        t.append(f"{label} · {target}", style=f"bold {TXT}")
+        t.append(f"   running · {secs:.0f}s", style=FAINT)
         self._activity(t)
 
     def _activity_waiting(self) -> None:
@@ -965,10 +1031,12 @@ class LexisVisor(App):
 
     def _activity_done(self, ok: bool, detail: str,
                        duration: float) -> None:
+        self._activity_started_at = None
         label, target = self._activity_current or ("Tool", "")
         t = Text(no_wrap=True, overflow="ellipsis")
         t.append("✓ " if ok else "✗ ", style=GREEN if ok else RED)
         t.append(f"{label} · {target}", style=f"bold {TXT}")
+        detail = _plain_detail(detail)
         if detail:
             t.append(f" — {detail}", style=DIM)
         t.append(f" · {duration:.1f} s", style=FAINT)
@@ -976,6 +1044,14 @@ class LexisVisor(App):
 
     def _post(self, widget) -> None:
         chat = self._chat()
+        try:
+            # Conversation text is selectable with the mouse
+            # (Master's bug, 2026-11-11: nothing on screen
+            # could be copied out). Ctrl+Shift+C copies the
+            # selection; /copy covers the keyboard-only path.
+            widget.allow_select = True
+        except Exception:
+            pass
         chat.mount(widget)
         chat.scroll_end(animate=False)
 
@@ -1104,12 +1180,28 @@ class LexisVisor(App):
         if getattr(self, "_stopping", False):
             return "◇", "Ember dimming · stopping"
         if not self.busy:
-            return "◦", "Ember low · idle"
+            return (
+                flames.status_flame(
+                    getattr(self, "_idle_frame", 0), False,
+                    self.reduced_motion),
+                "Ember low · idle",
+            )
         if self._awaiting:
             return "◆", "Held flame · awaiting your word"
+        icon = flames.status_flame(
+            self._typing_frame, True, self.reduced_motion)
+        # The wait is timed where the user looks (Master,
+        # 2026-11-11): past five seconds the status itself
+        # counts, so a silent provider can never look like a
+        # frozen app.
+        wait = ""
+        if self._turn_started is not None:
+            secs = int(time.time() - self._turn_started)
+            if secs >= 5:
+                wait = f" · {secs}s"
         if self._streaming:
-            return "🔥", "Flame · typing"
-        return "🔥", "Ablaze · working"
+            return icon, f"Flame · typing{wait}"
+        return icon, f"Ablaze · working{wait}"
 
     def _refresh_status(self) -> None:
         try:
@@ -1143,6 +1235,7 @@ class LexisVisor(App):
                 if self.busy and not self.reduced_motion else None
             ),
             width=status_w.size.width or 0,
+            folder=self.pulse.workdir,
         ))
 
     # ---------- composer / queue ----------
@@ -1163,6 +1256,14 @@ class LexisVisor(App):
             return
         if text.startswith("/"):
             if self.busy:
+                # /model is a control, not work (bug, Master
+                # 2026-11-11): a mid-task switch must land now
+                # and steer the task from its next step, never
+                # queue behind the work it should steer.
+                if text.strip().split(maxsplit=1)[0].lower() \
+                        == "/model":
+                    self._run_slash(text)
+                    return
                 self.queue.append(("cmd", text))
                 self._post_note(
                     f"Queued. “{text}” runs as soon as the current "
@@ -1429,8 +1530,17 @@ class LexisVisor(App):
                 if self._approval_event is not None:
                     self._approval_event.set()
 
+            warning = ""
+            if data.get("warn_once"):
+                warning = (
+                    "BLAZE · Loyal: this is your one warning for "
+                    "this kind of action. Approve it and Lexis "
+                    "will not ask again this session."
+                )
             self.push_screen(
-                ApprovalScreen(data.get("path", ""), data.get("content", "")),
+                ApprovalScreen(
+                    data.get("path", ""), data.get("content", ""),
+                    warning=warning),
                 done,
             )
 
@@ -1475,6 +1585,15 @@ class LexisVisor(App):
     def _on_event_ui(self, kind: str, data: dict) -> None:
         name = data.get("name", "")
         path = data.get("path", "")
+        if kind == "phase":
+            # The phase contract: Pulse owns the work phase and
+            # emits it as data; the flame renderer consumes it
+            # instead of deriving the phase locally.
+            self._pulse_phase = data.get("phase", "")
+        if kind == "tool_output":
+            text = str(data.get("text", ""))
+            if text:
+                self._stream_tool_line(text)
         if kind == "tool_start":
             self._tools_running = getattr(self, "_tools_running", 0) + 1
         elif kind == "tool_end":
@@ -1485,6 +1604,8 @@ class LexisVisor(App):
             # chat (Master, 2026-11-11; Hermes keeps it separate
             # and so do we now).
             label = _TOOL_LABELS.get(name, name)
+            self._stream_tool_name = name
+            self._stream_tool_path = path
             self._activity_running(label, path)
             self.plan_steps.append(("now", f"{label} {os.path.basename(path)}"))
             if name == "write_file":
@@ -1494,19 +1615,32 @@ class LexisVisor(App):
                 bool(data.get("ok")), data.get("detail", ""),
                 float(data.get("duration", 0.0)),
             )
-            self.plan_steps = [
-                ("done" if s == "now" else s, lbl)
-                for s, lbl in self.plan_steps
-            ]
+            # Plan steps tell the truth (Master, 2026-11-11):
+            # a failed step shows a cross, never a green tick.
+            ok = bool(data.get("ok", True))
+            marked = False
+            new_steps = []
+            for s, lbl in self.plan_steps:
+                if s == "now" and not marked:
+                    new_steps.append(
+                        ("done" if ok else "fail", lbl))
+                    marked = True
+                else:
+                    new_steps.append((s, lbl))
+            self.plan_steps = new_steps
             if name == "write_file":
                 if data.get("ok"):
                     self._turn_writes.append(path)
                 self._finish_live()
+            elif name in ("run_command", "run_tests"):
+                if (self._live is not None
+                        and self._live.get("kind") == "output"):
+                    self._finish_live()
         elif kind == "judge_verdict":
             self.last_verdict = data
             status = data.get("status", "")
             reasons = data.get("reasons", [])
-            first = reasons[0] if reasons else ""
+            first = _plain_reason(reasons[0]) if reasons else ""
             if status == "pass":
                 self._post_note(f"✓ Checked: {first}")
             elif status == "warn":
@@ -1565,6 +1699,33 @@ class LexisVisor(App):
         self._refresh_all()
 
     # ---------- live coding ----------
+
+    def _stream_tool_line(self, line: str) -> None:
+        """Live terminal output (Master, 2026-11-11): command
+        and test lines appear in the live panel as the process
+        prints them, instead of arriving in one block at the
+        end of the run."""
+        live = self._live
+        if live is None or live.get("kind") != "output":
+            name = getattr(self, "_stream_tool_name", "")
+            label = _TOOL_LABELS.get(name, "Terminal")
+            target = getattr(self, "_stream_tool_path", "")
+            self._live = {
+                "path": f"{label} · {target}".rstrip(" ·"),
+                "content": "", "revealed": 0, "total": 1,
+                "streaming": True, "kind": "output",
+            }
+            self.query_one("#livecode", Static).add_class("on")
+            live = self._live
+        lines = live["content"].split("\n") if live["content"] \
+            else []
+        lines.append(line)
+        lines = lines[-300:]
+        live["content"] = "\n".join(lines)
+        live["total"] = max(len(lines), 1)
+        live["revealed"] = live["total"]
+        self._render_live()
+        self._follow_tail()
 
     def _start_live(self, path: str, content: str) -> None:
         """Execution-time entry for a write. If the panel is
@@ -1631,12 +1792,18 @@ class LexisVisor(App):
         if self._live is None:
             return
         live = self._live
+        kind = live.get("kind", "code")
+        shown = live["path"] if kind == "output" \
+            else os.path.basename(live["path"])
         head = Text(no_wrap=True, overflow="ellipsis")
         head.append(separator_text(
-            "LIVE CODING", os.path.basename(live["path"])))
+            "TERMINAL" if kind == "output" else "LIVE CODING",
+            shown))
         head.append("\n")
-        head.append("● LIVE CODING  ", style=f"bold {AMBER}")
-        head.append(os.path.basename(live["path"]), style=f"bold {TXT}")
+        head.append(
+            "● TERMINAL  " if kind == "output"
+            else "● LIVE CODING  ", style=f"bold {AMBER}")
+        head.append(shown, style=f"bold {TXT}")
         if live.get("streaming"):
             head.append(
                 f"   streaming · {live['revealed']} lines so far\n",
@@ -1664,8 +1831,12 @@ class LexisVisor(App):
                     ch, style=styles.get(i) if ch != " " else None)
             head.append_text(spark_line)
             head.append("\n")
-        body = code_text(live["content"], reveal=live["revealed"],
-                         path=live["path"])
+        if kind == "output":
+            body = Text(live["content"], style=TXT)
+        else:
+            body = code_text(live["content"],
+                             reveal=live["revealed"],
+                             path=live["path"])
         if live.get("streaming"):
             renderable = Group(head, body, Text("█", style=EMBER))
         else:
@@ -1704,15 +1875,32 @@ class LexisVisor(App):
         if live_streaming:
             self._sync_live_stream()
         if not w.has_class("on") and not dimming and not live_streaming:
-            timer = getattr(self, "_flame_timer", None)
-            if timer is not None:
-                timer.pause()
+            # Idle: the status ember breathes slowly, so the
+            # fire is visibly alive even at rest (Master,
+            # 2026-11-11). Reduced motion rests the timer as
+            # before; stillness wins there.
+            if self.reduced_motion:
+                timer = getattr(self, "_flame_timer", None)
+                if timer is not None:
+                    timer.pause()
+                return
+            self._idle_frame = getattr(self, "_idle_frame", 0) + 1
+            if self._idle_frame % 6 == 0:
+                self._refresh_status()
             return
         if not w.has_class("on") and not dimming:
             return  # only the live panel is animating
         self._typing_frame += 1
         f = self._typing_frame
         if dimming:
+            target, label, phase = 0.0, "Lexis is stopping", "dimming"
+        elif getattr(self, "_pulse_phase", "") == "held-for-approval":
+            target, label, phase = 0.85, "Lexis is held", "held"
+        elif getattr(self, "_pulse_phase", "") in (
+                "typing", "working", "thinking"):
+            _p = self._pulse_phase
+            target, label, phase = 1.0, f"Lexis is {_p}", _p
+        elif getattr(self, "_pulse_phase", "") == "dimming":
             target, label, phase = 0.0, "Lexis is stopping", "dimming"
         elif self._awaiting:
             target, label, phase = 0.85, "Lexis is held", "held"
@@ -1722,6 +1910,13 @@ class LexisVisor(App):
             target, label, phase = 1.0, "Lexis is working", "working"
         else:
             target, label, phase = 1.0, "Lexis is thinking", "thinking"
+        if self.busy and self._turn_started is not None:
+            _secs = int(time.time() - self._turn_started)
+            if _secs >= 5:
+                # Liveness (Master's bug, 2026-11-11): a long
+                # wait must LOOK long. Thinking and dead may
+                # never render the same again.
+                label = f"{label} · {_secs}s"
         if self.reduced_motion:
             self._flame_level = target
         else:
@@ -1741,6 +1936,27 @@ class LexisVisor(App):
         w.update(t)
         if f % 5 == 0 and (self.busy or dimming):
             self._refresh_status()
+        if f % 5 == 0 and getattr(self, "_tools_running", 0):
+            self._activity_tick()
+        if (f % 5 == 0 and self.busy and not dimming
+                and not self._streaming
+                and not getattr(self, "_tools_running", 0)
+                and self._turn_started is not None):
+            # A silent provider or model announces itself
+            # once per turn (Master, 2026-11-11): a timed
+            # note, not a frozen screen.
+            secs = int(time.time() - self._turn_started)
+            if (secs >= 30
+                    and getattr(self, "_stall_noted_for", None)
+                    != self._turn_started):
+                self._stall_noted_for = self._turn_started
+                model = ("the model" if self.compass.auto
+                         else self.compass.current)
+                self._post_note(
+                    f"Still waiting for {model} to answer "
+                    f"· {secs}s. If it stays silent, Lexis "
+                    "switches models on its own."
+                )
 
     # ---------- slash command preview ----------
 
@@ -1825,6 +2041,147 @@ class LexisVisor(App):
 
     # ---------- slash commands ----------
 
+    def _copy_out(self, text: str, what: str) -> None:
+        """Put text on the system clipboard and say so. The
+        Win32 module is the primary path (proven on the
+        owner's desktop class of session); Textual's own
+        clipboard write is the fallback."""
+        from lexis.visor import clipboard
+
+        ok = False
+        try:
+            ok = bool(clipboard.set_text(text))
+        except Exception:
+            ok = False
+        if not ok:
+            try:
+                self.copy_to_clipboard(text)
+                ok = True
+            except Exception:
+                ok = False
+        if ok:
+            self._post_note(
+                f"Copied {what} ({len(text)} characters).")
+        else:
+            self._post_note(
+                "Copy failed: the system clipboard is not "
+                "reachable from this session.")
+
+    def action_copy_selection(self) -> None:
+        """Ctrl+Shift+C: copy the mouse selection from the
+        conversation; with no selection, copy the last reply
+        (Master's bug, 2026-11-11: nothing could be copied
+        out of the chat)."""
+        text = ""
+        try:
+            text = self.screen.get_selected_text() or ""
+        except Exception:
+            text = ""
+        if text:
+            self._copy_out(text, "the selected text")
+        elif self.last_reply:
+            self._copy_out(self.last_reply, "Lexis's last reply")
+        else:
+            self._post_note("Nothing to copy yet.")
+
+    def _transcript_text(self) -> str:
+        """The visible conversation as plain text for /copy
+        all: owner and Lexis turns only, tool feedback and
+        system scaffolding left out."""
+        lines = []
+        for m in self.vault.messages()[3:]:
+            content = m["content"]
+            if content.startswith(
+                    ("[HASIL", "[SISTEM", "[ISI SKILL", "[IZIN")):
+                continue
+            who = "YOU" if m["role"] == "user" else "LEXIS"
+            lines.append(f"{who}: {content}")
+        return "\n\n".join(lines)
+
+    def _provider_models_note(self, name: str) -> str:
+        """Refresh the model catalog from the now-active
+        provider and report what was actually read (Master's
+        bug, 2026-11-11: an added provider kept the old
+        catalog and the old model)."""
+        count = self.compass.refresh_models()
+        if self.compass.catalog_source == "provider":
+            return (
+                f"{count} models read from {name}; now using "
+                f"{self.compass.current}. Applies from the next "
+                "request, no restart needed."
+            )
+        if self.compass.catalog_source == "provider-failed":
+            return (
+                f"Could not read a model list from {name}; "
+                "keeping the current catalog. Applies from the "
+                "next request, no restart needed."
+            )
+        return (
+            f"Using the built-in catalog ({count} models); now "
+            f"using {self.compass.current}. Applies from the "
+            "next request, no restart needed."
+        )
+
+    def _start_evolve(self, slug: str) -> None:
+        """Draft a skill from this session's verified work
+        (Step 3): the drafting model call runs in the turn
+        worker so the interface never freezes."""
+        if self.busy:
+            self._post_note(
+                "Lexis is working. Wait for the turn to finish, "
+                "then /evolve."
+            )
+            return
+        if not slug:
+            self._post_note(
+                "Usage: /evolve <skill-name>. Lexis drafts a "
+                "skill from this session's verified work; the "
+                "draft waits for your approval under /skills."
+            )
+            return
+        self.busy = True
+        self._arm_turn_state()
+        self.stop_event.clear()
+        self.query_one("#typing", Static).add_class("on")
+        self._refresh_all()
+        self.run_worker(
+            lambda: self._evolve_worker(slug),
+            thread=True, group="turn", exclusive=False,
+        )
+
+    def _evolve_worker(self, slug: str) -> None:
+        try:
+            result = self.pulse.evolve_skill(slug)
+        except Exception as e:
+            result = {"ok": False, "reason": str(e)}
+        self.call_from_thread(self._evolve_done, result)
+
+    def _evolve_done(self, result: dict) -> None:
+        self.busy = False
+        try:
+            self.query_one("#typing", Static).remove_class("on")
+        except Exception:
+            pass
+        if not result.get("ok"):
+            self._post_note(
+                "Could not draft the skill: "
+                + result.get("reason", "unknown reason")
+            )
+        elif result.get("status") == "blocked":
+            self._post_note(
+                f"Draft skill {result['slug']} was BLOCKED by "
+                "the security scan ("
+                + ", ".join(result.get("findings", []))
+                + "). It will never activate."
+            )
+        else:
+            self._post_note(
+                f"Draft skill {result['slug']} is written and "
+                "pending. Review it under /skills, then approve "
+                f"it with /skills approve {result['slug']}."
+            )
+        self._refresh_all()
+
     def _run_slash(self, text: str) -> None:
         parts = text.strip().split(maxsplit=1)
         cmd = parts[0].lower()
@@ -1839,13 +2196,27 @@ class LexisVisor(App):
                         self.session_id, "model",
                         "Auto" if self.compass.auto else self.compass.current,
                     )
-                    self._post_note(
-                        "Auto routing is on. Lexis picks the model "
-                        "per task, with the probed fallback chain "
-                        "behind it."
-                        if self.compass.auto
-                        else f"Model switched to {self.compass.current}."
-                    )
+                    if self.busy:
+                        # Honest timing (Master, 2026-11-11):
+                        # the step already streaming finishes
+                        # on the old model; the switch steers
+                        # from the next step of this task.
+                        self._post_note(
+                            "Auto routing is on. It applies "
+                            "from the next step of this task."
+                            if self.compass.auto
+                            else f"Model switched to "
+                            f"{self.compass.current}. It applies "
+                            "from the next step of this task."
+                        )
+                    else:
+                        self._post_note(
+                            "Auto routing is on. Lexis picks the model "
+                            "per task, with the probed fallback chain "
+                            "behind it."
+                            if self.compass.auto
+                            else f"Model switched to {self.compass.current}."
+                        )
                 else:
                     self._post_note("That model is not in the catalog.")
             else:
@@ -1861,12 +2232,21 @@ class LexisVisor(App):
                         self.ledger.append_event(
                             self.session_id, "model", label
                         )
-                        self._post_note(f"Model switched to {label}.")
+                        if self.busy:
+                            self._post_note(
+                                f"Model switched to {label}. "
+                                "It applies from the next step "
+                                "of this task."
+                            )
+                        else:
+                            self._post_note(
+                                f"Model switched to {label}.")
                         self._refresh_all()
 
                 self.push_screen(
                     PickScreen(
-                        "Switch model", ["Auto"] + MODELS,
+                        "Switch model",
+                        ["Auto"] + self.compass.list_models(),
                         "Auto" if self.compass.auto
                         else self.compass.current,
                     ),
@@ -1879,10 +2259,8 @@ class LexisVisor(App):
                         self.session_id, "provider", arg
                     )
                     self._post_note(
-                        f"Provider is now {arg}. It applies from "
-                        "the next request, no restart needed. The "
-                        "model list is unchanged: the endpoint must "
-                        "serve the selected model id."
+                        f"Provider is now {arg}. "
+                        + self._provider_models_note(arg)
                     )
                 else:
                     names = ", ".join(
@@ -1905,10 +2283,8 @@ class LexisVisor(App):
                             self.session_id, "provider", name
                         )
                         self._post_note(
-                            f"Provider {name} saved and active. It "
-                            "applies from the next request. The "
-                            "model list is unchanged: the endpoint "
-                            "must serve the selected model id."
+                            f"Provider {name} saved and active. "
+                            + self._provider_models_note(name)
                         )
                         self._refresh_all()
 
@@ -1923,8 +2299,8 @@ class LexisVisor(App):
                             self.session_id, "provider", choice
                         )
                         self._post_note(
-                            f"Provider is now {choice}. It applies "
-                            "from the next request, no restart needed."
+                            f"Provider is now {choice}. "
+                            + self._provider_models_note(choice)
                         )
                         self._refresh_all()
 
@@ -2019,11 +2395,40 @@ class LexisVisor(App):
             self._show_verify()
         elif cmd == "/doctor":
             self._run_self_check()
+        elif cmd == "/copy":
+            if arg.strip().lower() == "all":
+                text = self._transcript_text()
+                if text:
+                    self._copy_out(text, "the conversation")
+                else:
+                    self._post_note("Nothing to copy yet.")
+            elif self.last_reply:
+                self._copy_out(self.last_reply, "Lexis's last reply")
+            else:
+                self._post_note("Nothing to copy yet.")
+        elif cmd == "/evolve":
+            self._start_evolve(arg.strip())
         elif cmd == "/skills":
             registry = getattr(self.pulse, "skills", None)
-            if registry is None or not registry.skills:
+            if registry is None:
+                self._post_note("The skill registry is not ready.")
+            elif arg.lower().startswith("approve "):
+                slug = arg.split(None, 1)[1].strip()
+                registry.refresh()
+                if registry.approve(slug):
+                    self._post_note(
+                        f"Skill {slug} approved and active. It "
+                        "rides in the catalog from the next turn."
+                    )
+                else:
+                    self._post_note(
+                        f"Skill {slug} cannot be approved: it is "
+                        "unknown or blocked by the security scan."
+                    )
+            elif not registry.skills:
                 self._post_note("No skills are installed yet.")
             else:
+                registry.refresh()
                 rows = [
                     f"{r['slug']:<28} {r['status']}"
                     for r in sorted(
@@ -2063,7 +2468,7 @@ class LexisVisor(App):
         old_id = self.session_id
         self.session_id = self.ledger.start_session(
             self.compass.current)
-        self.vault.replace_all(self.vault.bootstrap())
+        self.vault.replace_all(self.vault.bootstrap(self.root))
         for m in self.vault.messages():
             self.ledger.append_message(
                 self.session_id, m["role"], m["content"])
@@ -2092,7 +2497,7 @@ class LexisVisor(App):
         self._post_note("Session resumed. The whole history is back.")
 
     def _set_mode(self, mode: str) -> None:
-        self.warden.mode = mode
+        self.warden.set_mode(mode)
         self.ledger.append_event(self.session_id, "mode", mode)
         self._post_note(f"Compliance mode is now {mode}.")
         self._refresh_all()

@@ -311,6 +311,25 @@ class Ledger:
                 continue
         return rows
 
+    def events(self, session_id: int, kind=None, limit: int = 200):
+        """Event details for one session, oldest first, optionally
+        filtered by kind. The judge's per-turn verdicts live here
+        (kind 'judge'), which is what the evolve evidence gate
+        reads."""
+        if kind is None:
+            cur = self._conn.execute(
+                "SELECT detail FROM events WHERE session_id = ? "
+                "ORDER BY id LIMIT ?",
+                (session_id, limit),
+            )
+        else:
+            cur = self._conn.execute(
+                "SELECT detail FROM events WHERE session_id = ? "
+                "AND kind = ? ORDER BY id LIMIT ?",
+                (session_id, kind, limit),
+            )
+        return [row[0] for row in cur.fetchall()]
+
     def close(self) -> None:
         for conn in self._all_conns:
             try:

@@ -140,12 +140,19 @@ class VisorTurnTest(unittest.IsolatedAsyncioTestCase):
 
                     asyncio.ensure_future(_wd())
                     app.submit_text("write the note")
-                    # approval screen must appear before anything is written
+                    # Wait for the approve BUTTON, not just the
+                    # screen class: under load the class can
+                    # register a beat before its DOM mounts, and
+                    # querying earlier races the compose.
+                    def approve_ready():
+                        try:
+                            return len(
+                                app.screen.query("#approve")) > 0
+                        except Exception:
+                            return False
+
                     self.assertTrue(
-                        await wait_for(
-                            lambda: app.screen.__class__.__name__
-                            == "ApprovalScreen"
-                        ),
+                        await wait_for(approve_ready),
                         "approval screen never appeared",
                     )
                     self.assertFalse(os.path.exists(target))
@@ -790,6 +797,264 @@ class ClipboardTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("help", entry.value)
         finally:
             cb.get_text, cb.set_text = orig_get, orig_set
+
+
+class BlazeVisorTest(unittest.IsolatedAsyncioTestCase):
+    """BLAZE in the real Visor: the approval screen appears
+    exactly once, carrying the one-warning text, and the
+    second write of the same turn proceeds on its own."""
+
+    async def test_blaze_warns_once_in_the_visor(self):
+        orig = bridge.stream_chat
+        with tempfile.TemporaryDirectory() as d:
+            a = os.path.join(d, "a.py")
+            b = os.path.join(d, "b.py")
+            calls = []
+
+            def fake(model, messages, key):
+                calls.append(1)
+                if len(calls) == 1:
+                    yield (
+                        f"[WRITE_FILE: {a}]print('a')\n[/WRITE_FILE]\n"
+                        f"[WRITE_FILE: {b}]print('b')\n[/WRITE_FILE]"
+                    )
+                else:
+                    yield "both written"
+
+            bridge.stream_chat = fake
+            try:
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(130, 48)) as pilot:
+                    await pilot.pause()
+                    app._set_mode("BLAZE")
+                    pushes = []
+                    warnings = []
+                    orig_push = app.push_screen
+
+                    def counting(screen, callback=None, **kw):
+                        pushes.append(screen.__class__.__name__)
+                        if screen.__class__.__name__ == "ApprovalScreen":
+                            warnings.append(screen.warning)
+                        return orig_push(screen, callback, **kw)
+
+                    app.push_screen = counting
+
+                    async def _approve_first():
+                        for _ in range(60):
+                            await asyncio.sleep(0.5)
+                            if (app.screen.__class__.__name__
+                                    == "ApprovalScreen"):
+                                from textual.widgets import Button
+
+                                app.screen.query_one(
+                                    "#approve", Button).press()
+                                return
+
+                    asyncio.ensure_future(_approve_first())
+                    app.submit_text("write both files")
+                    self.assertTrue(
+                        await wait_for(lambda: not app.busy),
+                        "turn did not finish",
+                    )
+                    self.assertEqual(["ApprovalScreen"], pushes)
+                    self.assertEqual(1, len(warnings))
+                    self.assertIn("one warning", warnings[0])
+                    self.assertTrue(os.path.isfile(a))
+                    self.assertTrue(os.path.isfile(b))
+            finally:
+                bridge.stream_chat = orig
+
+
+class VisorCopyTest(unittest.IsolatedAsyncioTestCase):
+    """Bug 2 (Master, 2026-11-11): conversation text must be
+    copyable OUT of the chat: selectable widgets, /copy for
+    the last reply, /copy all for the transcript."""
+
+    async def test_copy_paths_and_selectable_chat(self):
+        from lexis.cortex import bridge as _bridge
+        from lexis.visor import clipboard as _clip
+
+        captured = []
+        old_set = _clip.set_text
+        _clip.set_text = lambda text: captured.append(text) or True
+        old_stream = _bridge.stream_chat
+
+        def stream(model, messages, key):
+            yield "Jawaban penting untuk disalin."
+
+        _bridge.stream_chat = stream
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(130, 48)) as pilot:
+                    await pilot.pause()
+                    app.submit_text("halo")
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: not app.busy
+                            and "Jawaban penting" in chat_text(app)
+                        ),
+                        "the turn never finished",
+                    )
+                    msgs = app.query("#chat .msg")
+                    self.assertTrue(len(msgs) > 0)
+                    self.assertTrue(
+                        all(w.allow_select for w in msgs),
+                        "chat messages are not selectable",
+                    )
+                    app.submit_text("/copy")
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: "Copied Lexis's last reply"
+                            in chat_text(app)
+                        ),
+                        "/copy never reported",
+                    )
+                    self.assertEqual(
+                        ["Jawaban penting untuk disalin."], captured)
+                    app.submit_text("/copy all")
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: len(captured) == 2),
+                        "/copy all never copied",
+                    )
+                    self.assertIn("YOU: halo", captured[1])
+                    self.assertIn(
+                        "LEXIS: Jawaban penting", captured[1])
+        finally:
+            _clip.set_text = old_set
+            _bridge.stream_chat = old_stream
+
+
+class VisorEvolveTest(unittest.IsolatedAsyncioTestCase):
+    """Step 3 surfaces: /evolve refuses without verified work,
+    and /skills approve activates a pending draft."""
+
+    def seed_draft(self, root):
+        path = os.path.join(root, "skills", "house-style",
+                            "SKILL.md")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(
+                "---\n"
+                "name: house-style\n"
+                "description: the house style\n"
+                "version: 1\n"
+                "source: evolve\n"
+                "---\n\n## Steps\n1. Write.\n"
+            )
+
+    async def test_evolve_gate_and_skills_approve(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.seed_draft(d)
+            app = LexisVisor(root=d)
+            async with app.run_test(size=(130, 48)) as pilot:
+                await pilot.pause()
+                app.submit_text("/evolve fresh-one")
+                self.assertTrue(
+                    await wait_for(
+                        lambda: "no verified success"
+                        in chat_text(app)
+                    ),
+                    "evolve never reported the evidence gate",
+                )
+                app.submit_text("/skills approve house-style")
+                await pilot.pause()
+                self.assertTrue(
+                    await wait_for(
+                        lambda: "approved and active"
+                        in chat_text(app)
+                    ),
+                    "approval never landed",
+                )
+                self.assertEqual(
+                    "active",
+                    app.pulse.skills.status_of("house-style"),
+                )
+
+
+class PlainWordsTest(unittest.TestCase):
+    """No kitchen words on the user's surface (Master,
+    2026-11-11): raw errnos and internal tool names are
+    translated before display."""
+
+    def test_plain_detail_translates_errno(self):
+        from lexis.visor.app import _plain_detail
+
+        self.assertEqual(
+            _plain_detail(
+                "[Errno 2] No such file or directory: "
+                "'workspace/x.py'"),
+            "the file does not exist")
+        self.assertEqual(
+            _plain_detail("128 lines · 4.2 KB"),
+            "128 lines · 4.2 KB")
+
+    def test_plan_text_renders_fail_cross(self):
+        from lexis.visor import panels
+
+        t = panels.plan_text([("fail", "Run tests x")])
+        self.assertIn("✗", t.plain)
+
+    def test_plain_reason_scrubs_judge_text(self):
+        from lexis.visor.app import _plain_reason
+
+        out = _plain_reason(
+            "A step did not complete: read_file "
+            "([Errno 2] No such file or directory: 'a.txt')")
+        self.assertIn("Read file", out)
+        self.assertIn("the file does not exist", out)
+        self.assertNotIn("Errno", out)
+        self.assertNotIn("read_file", out)
+
+
+class ModelSwitchBusyPilotTest(unittest.IsolatedAsyncioTestCase):
+    """A mid-task /model switch lands immediately and steers
+    the next step (bug, Master 2026-11-11); it never queues
+    behind the running work."""
+
+    async def test_model_switch_applies_while_busy(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = LexisVisor(root=d)
+            async with app.run_test(size=(130, 48)) as pilot:
+                await pilot.pause()
+                others = [m for m in app.compass.list_models()
+                          if m != app.compass.current]
+                self.assertTrue(others)
+                app.busy = True
+                try:
+                    app.submit_text(f"/model {others[0]}")
+                    await pilot.pause()
+                    self.assertEqual(app.compass.current,
+                                     others[0])
+                    self.assertFalse(app.compass.auto)
+                    self.assertEqual(len(app.queue), 0)
+                    self.assertIn("next step", chat_text(app))
+                finally:
+                    app.busy = False
+
+
+class PlanHonestyPilotTest(unittest.IsolatedAsyncioTestCase):
+    """A failed tool marks its plan step with a cross, never
+    a green tick (Master, 2026-11-11)."""
+
+    async def test_failed_tool_marks_step_fail(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = LexisVisor(root=d)
+            async with app.run_test(size=(130, 48)) as pilot:
+                await pilot.pause()
+                app._on_event_ui("tool_start", {
+                    "name": "run_command", "path": "dir",
+                })
+                app._on_event_ui("tool_end", {
+                    "name": "run_command", "path": "dir",
+                    "ok": False, "detail": "exit=1",
+                    "duration": 0.2,
+                })
+                await pilot.pause()
+                states = [s for s, _ in app.plan_steps]
+                self.assertIn("fail", states)
+                self.assertNotIn("now", states)
 
 
 if __name__ == "__main__":
