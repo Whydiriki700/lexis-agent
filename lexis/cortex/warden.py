@@ -28,10 +28,13 @@ class Warden:
         self.planning = False
 
     def decide(self, risk: str) -> str:
-        """risk is 'read' or 'write' in Fase 1."""
+        """risk is 'read', 'write', or 'exec' (the full toolset).
+        Executing is gated exactly like writing: plan drafting
+        denies it in every mode, INFERNO allows it, the guarded
+        modes ask."""
         if risk == "read":
             return ALLOW
-        if risk == "write":
+        if risk in ("write", "exec"):
             if self.planning:
                 return DENY
             if self.mode == "INFERNO":

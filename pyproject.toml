@@ -19,7 +19,8 @@ dependencies = [
 lexis = "lexis.cli:main"
 
 [tool.setuptools]
-packages = ["lexis", "lexis.cortex", "lexis.visor"]
+packages = ["lexis", "lexis.cortex", "lexis.visor", "lexis.skill_library"]
 
 [tool.setuptools.package-data]
 "lexis.visor" = ["theme.tcss"]
+"lexis.skill_library" = ["*/SKILL.md"]

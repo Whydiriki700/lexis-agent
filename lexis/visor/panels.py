@@ -209,51 +209,103 @@ def _ctx_bar(pct: int, cells: int = 10) -> str:
 
 def status_text(*, model, provider, mode, mode_icon, conn, state_icon,
                 state_label, turn_in, turn_out, live, sess_total,
-                ctx_pct, turn_secs, queued) -> Text:
+                ctx_pct, turn_secs, queued, state_style=None,
+                width=0) -> Text:
     """The fixed status strip (Master, 2026-11-10): two lines that
     update in place and never print into the chat flow. Every value
-    is live app state; token figures carry the ~ estimate mark."""
-    out = Text(overflow="crop")
-    out.append("Model ", style=DIM)
-    out.append(str(model), style=f"bold {TXT}")
-    out.append(" · Provider ", style=DIM)
-    out.append(str(provider), style=f"bold {TXT}")
-    out.append(" · ", style=DIM)
-    out.append(f"{mode_icon} {mode}", style=f"bold {AMBER}")
-    out.append(" · Link ", style=DIM)
+    is live app state; token figures carry the ~ estimate mark.
+
+    Hermes status discipline (adopted 2026-11-10): three segments
+    are pinned and never shrink or drop (the flame state, the
+    model, the context); tail segments drop WHOLE, in a fixed
+    order, as the terminal narrows. Nothing is ever cut in the
+    middle of a segment."""
+    def seg(*parts):
+        t = Text()
+        for text, style in parts:
+            t.append(text, style=style)
+        return t
+
     if conn == "linked":
-        out.append("● linked", style=GREEN)
+        link = seg(("Link ", DIM), ("● linked", GREEN))
     elif conn == "error":
-        out.append("● link error", style=RED)
+        link = seg(("Link ", DIM), ("● link error", RED))
     else:
-        out.append("○ standby", style=FAINT)
-    out.append(" · ", style=DIM)
-    out.append(f"{state_icon} {state_label}", style=f"bold {EMBER}")
-    out.append("\n")
-    out.append("Turn ", style=DIM)
+        link = seg(("Link ", DIM), ("○ standby", FAINT))
+
     if live:
-        out.append(f"out {_fmt_tokens(turn_out)} live", style=TXT)
+        turn = seg(("Turn ", DIM),
+                   (f"out {_fmt_tokens(turn_out)} live", TXT))
     elif turn_in is not None:
-        out.append(
-            f"in {_fmt_tokens(turn_in)} · out "
-            f"{_fmt_tokens(turn_out or 0)}",
-            style=TXT,
+        turn = seg(
+            ("Turn ", DIM),
+            (f"in {_fmt_tokens(turn_in)} · out "
+             f"{_fmt_tokens(turn_out or 0)}", TXT),
         )
     else:
-        out.append("—", style=TXT)
-    out.append(" · Session cost ", style=DIM)
-    out.append(_fmt_tokens(sess_total) + " tokens" if sess_total else "—",
-               style=TXT)
-    out.append(" · Context ", style=DIM)
-    out.append(f"{ctx_pct}% ", style=TXT)
-    out.append(_ctx_bar(ctx_pct), style=EMBER)
-    out.append(" · Turn time ", style=DIM)
-    out.append(f"{turn_secs:.1f} s" if turn_secs is not None else "—",
-               style=f"bold {TXT}")
+        turn = seg(("Turn ", DIM), ("—", TXT))
+
+    line1 = [
+        ("model", seg(("Model ", DIM),
+                      (str(model), f"bold {TXT}")), True),
+        ("provider", seg(("Provider ", DIM),
+                         (str(provider), f"bold {TXT}")), False),
+        ("mode", seg((f"{mode_icon} {mode}", f"bold {AMBER}")), False),
+        ("link", link, False),
+        ("state", seg((f"{state_icon} {state_label}",
+                       state_style or f"bold {EMBER}")), True),
+    ]
+    line2 = [
+        ("turn", turn, False),
+        ("cost", seg(
+            ("Session cost ", DIM),
+            (_fmt_tokens(sess_total) + " tokens"
+             if sess_total else "—", TXT)), False),
+        ("context", seg(
+            ("Context ", DIM), (f"{ctx_pct}% ", TXT),
+            (_ctx_bar(ctx_pct), EMBER)), True),
+        ("time", seg(
+            ("Turn time ", DIM),
+            (f"{turn_secs:.1f} s" if turn_secs is not None else "—",
+             f"bold {TXT}")), False),
+    ]
     if queued:
-        out.append(" · Queued ", style=DIM)
-        out.append(str(queued), style=f"bold {AMBER}")
-    out.append(" · Autosaved · resumable anytime", style=DIM)
+        line2.append(
+            ("queued", seg(("Queued ", DIM),
+                           (str(queued), f"bold {AMBER}")), False))
+    line2.append(
+        ("autosaved", seg(("Autosaved · resumable anytime", DIM)),
+         False))
+
+    drop_order = ["autosaved", "queued", "time", "cost", "turn",
+                  "link", "provider", "mode"]
+
+    def line_len(items):
+        if not items:
+            return 0
+        return sum(len(s.plain) for _, s, _ in items) \
+            + 3 * (len(items) - 1)
+
+    def compose(items):
+        out = Text(no_wrap=True, overflow="crop")
+        for i, (_key, s, _pinned) in enumerate(items):
+            if i:
+                out.append(" · ", style=DIM)
+            out.append_text(s.copy())
+        return out
+
+    dropped = set()
+    for key in drop_order:
+        kept1 = [x for x in line1 if x[0] not in dropped]
+        kept2 = [x for x in line2 if x[0] not in dropped]
+        if not width or (line_len(kept1) <= width
+                         and line_len(kept2) <= width):
+            break
+        dropped.add(key)
+
+    out = compose([x for x in line1 if x[0] not in dropped])
+    out.append("\n")
+    out.append_text(compose([x for x in line2 if x[0] not in dropped]))
     return out
 
 

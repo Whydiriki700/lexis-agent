@@ -437,5 +437,257 @@ class MasterFixBatchTest(unittest.IsolatedAsyncioTestCase):
                 self.assertGreater(rail.max_scroll_y, 0)
 
 
+class StopCommandTest(unittest.IsolatedAsyncioTestCase):
+    """Master's urgent revision (2026-11-10): /stop is an
+    official command equal to Esc, it never queues, and the
+    flame dims to low ember instead of vanishing."""
+
+    async def test_stop_command_stops_and_dims_out(self):
+        import time as _time
+
+        orig = bridge.stream_chat
+
+        def fake(model, messages, key):
+            for i in range(600):
+                _time.sleep(0.02)
+                yield f"t{i} "
+
+        bridge.stream_chat = fake
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(150, 48)) as pilot:
+                    await pilot.pause()
+                    from lexis.visor.app import PALETTE_COMMANDS
+
+                    self.assertIn(
+                        "/stop",
+                        [c[0] for c in PALETTE_COMMANDS],
+                    )
+                    app.submit_text("cerita yang sangat panjang")
+                    self.assertTrue(
+                        await wait_for(lambda: app.busy)
+                    )
+                    app.submit_text("/stop")
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: not app.busy, timeout=20
+                        ),
+                        "/stop did not stop the turn",
+                    )
+                    typing_w = app.query_one("#typing")
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: not typing_w.has_class("on"),
+                            timeout=10,
+                        ),
+                        "the flame never dimmed out",
+                    )
+                    status = str(
+                        app.query_one("#status").render()
+                    )
+                    self.assertIn("Ember low", status)
+        finally:
+            bridge.stream_chat = orig
+
+    async def test_stop_drops_the_queue_and_reports(self):
+        import time as _time
+
+        orig = bridge.stream_chat
+
+        def fake(model, messages, key):
+            for i in range(600):
+                _time.sleep(0.02)
+                yield f"t{i} "
+
+        bridge.stream_chat = fake
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(150, 48)) as pilot:
+                    await pilot.pause()
+                    app.submit_text("kerjaan pertama")
+                    self.assertTrue(
+                        await wait_for(lambda: app.busy))
+                    app.submit_text("kerjaan kedua antre")
+                    await pilot.pause()
+                    self.assertEqual(len(app.queue), 1)
+                    app.submit_text("/stop")
+                    self.assertEqual(len(app.queue), 0)
+                    self.assertIn("dropped", chat_text(app))
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: not app.busy, timeout=20))
+        finally:
+            bridge.stream_chat = orig
+
+
+class TypingFlameTest(unittest.IsolatedAsyncioTestCase):
+    """The flame strip stays lit and MOVES while the reply
+    streams (Master's revision, 2026-11-10): the first token
+    must not retire it, and successive frames differ."""
+
+    async def test_flames_live_during_streaming(self):
+        import time as _time
+
+        orig = bridge.stream_chat
+
+        def fake(model, messages, key):
+            for i in range(300):
+                _time.sleep(0.03)
+                yield f"w{i} "
+
+        bridge.stream_chat = fake
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(150, 48)) as pilot:
+                    await pilot.pause()
+                    app.submit_text("cerita panjang")
+                    self.assertTrue(
+                        await wait_for(lambda: app.busy))
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: len(app._stream_buf) > 30),
+                        "the stream never started",
+                    )
+                    typing_w = app.query_one("#typing")
+                    self.assertTrue(
+                        typing_w.has_class("on"),
+                        "flame strip retired at the first token",
+                    )
+                    first = str(typing_w.render())
+                    await pilot.pause(1.2)
+                    second = str(typing_w.render())
+                    self.assertNotEqual(
+                        first, second,
+                        "the flame strip is frozen mid-stream",
+                    )
+                    app.submit_text("/stop")
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: not app.busy, timeout=20))
+        finally:
+            bridge.stream_chat = orig
+
+
+class StatusStripTest(unittest.TestCase):
+    """Hermes status discipline (2026-11-10): flame state,
+    model, and context are pinned; tail segments drop whole,
+    in order, as the width narrows."""
+
+    def _status(self, width):
+        from lexis.visor import panels
+
+        return panels.status_text(
+            model="deepseek-v4.1-flash-1017-fast",
+            provider="Osvyn", mode="EMBER", mode_icon="🔥",
+            conn="linked", state_icon="◦",
+            state_label="Ember low · idle",
+            turn_in=1200, turn_out=300, live=False,
+            sess_total=1500, ctx_pct=12, turn_secs=3.2,
+            queued=0, width=width,
+        ).plain
+
+    def test_wide_keeps_everything(self):
+        text = self._status(0)
+        for needle in ("Provider", "Session cost", "Autosaved",
+                       "Ember low", "Context"):
+            self.assertIn(needle, text)
+
+    def test_narrow_drops_tail_whole_keeps_pinned(self):
+        text = self._status(44)
+        for pinned in ("Ember low", "deepseek", "Context"):
+            self.assertIn(pinned, text)
+        for dropped in ("Autosaved", "Session cost", "Provider"):
+            self.assertNotIn(dropped, text)
+
+
+class SessionCycleTest(unittest.IsolatedAsyncioTestCase):
+    """/new and /start (Master, 2026-11-10): /new opens a clean
+    session with a new ledger id and never touches the old one;
+    /start reports the lit session."""
+
+    async def test_new_session_fresh_id_old_untouched(self):
+        orig = bridge.stream_chat
+
+        def fake(model, messages, key):
+            yield "jawaban sesi lama"
+
+        bridge.stream_chat = fake
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(150, 48)) as pilot:
+                    await pilot.pause()
+                    old_id = app.session_id
+                    app.submit_text("halo sesi lama")
+                    self.assertTrue(
+                        await wait_for(lambda: not app.busy))
+                    app.submit_text("/new")
+                    await pilot.pause()
+                    self.assertNotEqual(app.session_id, old_id)
+                    old_msgs = app.ledger.load_messages(old_id)
+                    self.assertTrue(
+                        any("halo sesi lama" in m["content"]
+                            for m in old_msgs),
+                        "the old session lost its history",
+                    )
+                    new_msgs = app.ledger.load_messages(
+                        app.session_id)
+                    self.assertFalse(
+                        any("halo sesi lama" in m["content"]
+                            for m in new_msgs),
+                        "the new session inherited old messages",
+                    )
+                    self.assertIn("New session lit", chat_text(app))
+        finally:
+            bridge.stream_chat = orig
+
+    async def test_start_reports_the_lit_session(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = LexisVisor(root=d)
+            async with app.run_test(size=(150, 48)) as pilot:
+                await pilot.pause()
+                app.submit_text("/start")
+                await pilot.pause()
+                self.assertIn("Work session lit", chat_text(app))
+
+
+class SyntaxLiveTest(unittest.IsolatedAsyncioTestCase):
+    """Rich Syntax for the code surfaces + ONE clock (Master,
+    2026-11-11): the reveal rides the flame clock, no second
+    timer may exist."""
+
+    def test_code_text_is_rich_syntax_with_foxfire_theme(self):
+        from rich.syntax import Syntax
+
+        from lexis.visor.app import FoxfireSyntaxStyle, code_text
+        syn = code_text("def ember():\n    return 1\n",
+                        path="x.py")
+        self.assertIsInstance(syn, Syntax)
+        self.assertEqual("Python", syn.lexer.name)
+        md = code_text("# Title\n", path="notes.md")
+        self.assertEqual("Markdown", md.lexer.name)
+        self.assertEqual("#0a0806",
+                         FoxfireSyntaxStyle.background_color)
+
+    async def test_reveal_rides_the_flame_clock(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = LexisVisor(root=d)
+            async with app.run_test(size=(120, 40)) as pilot:
+                await pilot.pause(2.2)
+                app._start_live(
+                    "big.py",
+                    "\n".join(f"line_{i} = {i}" for i in range(60)))
+                first = app._live["revealed"]
+                await pilot.pause(0.6)
+                second = app._live["revealed"]
+                self.assertGreater(second, first)
+                self.assertFalse(hasattr(app, "_live_timer"))
+                app._finish_live()
+                self.assertIsNone(app._live)
+
+
 if __name__ == "__main__":
     unittest.main()

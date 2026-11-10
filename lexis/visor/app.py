@@ -21,6 +21,19 @@ import time
 from contextlib import redirect_stdout
 from datetime import datetime
 
+from pygments.style import Style as PygmentsStyle
+from pygments.token import (
+    Comment,
+    Error,
+    Keyword,
+    Name,
+    Number,
+    Operator,
+    String,
+    Text as PygText,
+)
+from rich.console import Group
+from rich.syntax import Syntax
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -37,6 +50,7 @@ from lexis.cortex.pulse import Pulse
 from lexis.cortex.vault import Vault
 from lexis.cortex.warden import MODES, Warden
 from lexis.visor import panels
+from lexis.visor import flames
 from lexis.visor.icons import brain_fire_text, skull_fire_text
 from lexis.visor.banner import (
     AMBER,
@@ -66,58 +80,81 @@ PALETTE_COMMANDS = [
     ("/skills", "manage skills: install from GitHub, create new, disable", "—"),
     ("/mode", "switch compliance mode: EMBER · BLAZE · INFERNO", "Ctrl+."),
     ("/plan", "plan first, act after approval", "Ctrl+P"),
+    ("/stop", "stop the current work, the flame dims to low ember", "Esc"),
+    ("/new", "open a clean new session, the old one stays untouched", "—"),
+    ("/start", "show the lit work session and its flame state", "—"),
     ("/resume", "resume a previous session", "Ctrl+R"),
     ("/cost", "cost detail, layer by layer of savings", "—"),
     ("/verify", "run the independent check on the last result", "—"),
     ("/orion", "hand part of the work to Orion", "—"),
 ]
 
-_KEYWORDS = {
-    "def", "class", "return", "if", "elif", "else", "for", "while",
-    "import", "from", "as", "with", "try", "except", "finally", "raise",
-    "pass", "in", "is", "not", "and", "or", "None", "True", "False",
-    "lambda", "yield", "await", "async", "global", "del", "assert",
+class FoxfireSyntaxStyle(PygmentsStyle):
+    """The Foxfire Ember syntax theme (Master, 2026-11-11):
+    Rich Syntax renders the code, colored only from the locked
+    warm palette on the live panel's own background."""
+
+    background_color = "#0a0806"
+    default_style = ""
+    styles = {
+        PygText: "#e8ded2",
+        Comment: "italic #7a6a55",
+        Keyword: "bold #ff7a29",
+        Keyword.Constant: "#e0a83c",
+        Name.Function: "#ffd9a0",
+        Name.Class: "#ffd9a0",
+        Name.Builtin: "#ffc46b",
+        Name.Decorator: "#e0a83c",
+        String: "#9ccc8f",
+        Number: "#e0a83c",
+        Operator: "#ff9a3c",
+        Error: "#ff6b4a",
+    }
+
+
+_LEXER_BY_EXT = {
+    ".py": "python", ".js": "javascript", ".ts": "typescript",
+    ".json": "json", ".md": "markdown", ".html": "html",
+    ".css": "css", ".sh": "bash", ".yaml": "yaml", ".yml": "yaml",
+    ".toml": "toml", ".rs": "rust", ".go": "go", ".java": "java",
+    ".c": "c", ".cpp": "cpp", ".sql": "sql",
 }
-_TOKEN_RE = re.compile(
-    r"(?P<comment>\#.*$)"
-    r"|(?P<string>\"[^\"\n]*\"|'[^'\n]*')"
-    r"|(?P<number>\b\d+(?:\.\d+)?\b)"
-    r"|(?P<word>[A-Za-z_][A-Za-z0-9_]*)"
-)
 
 
-def code_text(content: str, reveal=None) -> Text:
-    """Syntax-tinted code with line numbers, in the warm palette only."""
+def _lexer_for(path) -> str:
+    if not path:
+        return "python"
+    return _LEXER_BY_EXT.get(
+        os.path.splitext(str(path))[1].lower(), "text")
+
+
+def code_text(content: str, reveal=None, path=None) -> Syntax:
+    """Real syntax highlighting (Rich Syntax + Pygments, Master
+    2026-11-11) with line numbers, Foxfire theme. reveal limits
+    the render to the first N lines for the live reveal."""
     lines = content.split("\n")
     if reveal is not None:
         lines = lines[:reveal]
-    out = Text()
-    for n, line in enumerate(lines, 1):
-        out.append(f"{n:>3} ", style=FAINT)
-        pos = 0
-        for m in _TOKEN_RE.finditer(line):
-            if m.start() > pos:
-                out.append(line[pos:m.start()], style=TXT)
-            kind = m.lastgroup
-            word = m.group()
-            if kind == "comment":
-                out.append(word, style="#5b6575 italic")
-            elif kind == "string":
-                out.append(word, style=STR_GREEN)
-            elif kind == "number":
-                out.append(word, style=AMBER)
-            elif word in _KEYWORDS:
-                out.append(word, style=f"bold {EMBER}")
-            else:
-                out.append(word, style=TXT)
-            pos = m.end()
-        out.append(line[pos:], style=TXT)
-        if n < len(lines):
-            out.append("\n")
-    return out
+    return Syntax(
+        "\n".join(lines),
+        _lexer_for(path),
+        theme=FoxfireSyntaxStyle,
+        line_numbers=True,
+        background_color="#0a0806",
+        word_wrap=False,
+    )
 
 
 _READ_MARKER_RE = re.compile(r"\[READ_FILE:\s*[^\]]*\]")
+_LINE_MARKER_RE = re.compile(
+    r"\[(?:SEARCH|LIST_DIR|RUN|RUN_TESTS|FETCH|BROWSE|USE_SKILL)"
+    r":[^\n\]]*\]?"
+)
+_MARKER_HEADS = (
+    "[READ_FILE:", "[WRITE_FILE:", "[EDIT_FILE:", "[SEARCH:",
+    "[LIST_DIR:", "[RUN:", "[RUN_TESTS:", "[FETCH:", "[BROWSE:",
+    "[USE_SKILL:",
+)
 
 
 def display_text(buf: str) -> str:
@@ -126,16 +163,17 @@ def display_text(buf: str) -> str:
     cards, the approval screen, and the live coding panel instead;
     protocol text is kitchen language and never reaches the user."""
     buf = _READ_MARKER_RE.sub("", buf)
-    idx = buf.find("[WRITE_FILE:")
-    if idx != -1:
-        buf = buf[:idx]
+    buf = _LINE_MARKER_RE.sub("", buf)
+    for head in ("[WRITE_FILE:", "[EDIT_FILE:"):
+        idx = buf.find(head)
+        if idx != -1:
+            buf = buf[:idx]
     i = buf.rfind("[")
     if i != -1:
         tail = buf[i:]
-        if "]" not in tail and (
-            "[READ_FILE:".startswith(tail)
-            or "[WRITE_FILE:".startswith(tail)
-            or tail.startswith(("[READ_FILE:", "[WRITE_FILE:"))
+        if "]" not in tail and any(
+            head.startswith(tail) or tail.startswith(head)
+            for head in _MARKER_HEADS
         ):
             buf = buf[:i]
     return buf
@@ -271,7 +309,8 @@ class ApprovalScreen(ModalScreen):
             if old:
                 yield Static(diff_text(old, self.content))
             else:
-                yield Static(code_text(self.content, reveal=80))
+                yield Static(code_text(
+                    self.content, reveal=80, path=self.path))
             yield Static(undo)
             with Horizontal():
                 yield Button("Approve", id="approve", variant="primary")
@@ -687,12 +726,15 @@ class LexisVisor(App):
         self._approval_event = None
         self._approval_result = "reject"
         self._typing_frame = 0
+        self._dimming = 0
+        self._stopping = False
+        self._flame_level = 0.0
+        self._live_frame = 0
         self._banner_wide = True
         self._slash_items = []
         self._slash_sel = 0
         self._slash_dismissed_for = None
         self._live = None  # {path, content, revealed, total}
-        self._live_timer = None
         self._resumed = False
 
     # ---------- setup ----------
@@ -730,6 +772,12 @@ class LexisVisor(App):
             on_event=self._cb_event,
             should_stop=self.stop_event.is_set,
         )
+        from lexis.cortex import skills as skills_mod
+
+        _slugs = skills_mod.sync_bundled(self.root)
+        _registry = skills_mod.SkillRegistry(self.root, self.ledger)
+        _registry.activate_bundled(_slugs)
+        self.pulse.skills = _registry
         welcome = self.query_one("#welcome", Static)
         if self._resumed:
             welcome.update(
@@ -742,7 +790,10 @@ class LexisVisor(App):
         if self.resume:
             self._render_history()
         self._refresh_all()
-        self._typing_timer = self.set_interval(0.35, self._tick_typing)
+        # One fine clock (~90 ms, Hermes class) drives all flame
+        # motion; it runs only while something animates.
+        self._flame_timer = self.set_interval(0.09, self._tick_flames)
+        self._flame_timer.pause()
         # A short repeating check keeps the banner matched to the
         # window: it catches the first real layout and every later
         # resize without depending on event timing.
@@ -809,10 +860,9 @@ class LexisVisor(App):
             yield Static(HINTS, id="hints")
 
     def on_unmount(self) -> None:
-        timer = getattr(self, "_typing_timer", None)
+        timer = getattr(self, "_flame_timer", None)
         if timer is not None:
             timer.stop()
-        self._stop_live_timer()
         try:
             self.ledger.close()
         except Exception:
@@ -950,6 +1000,8 @@ class LexisVisor(App):
     def _work_state(self):
         """The flame-language work state (Master, 2026-11-10): the
         strip says what the fire is doing, in place."""
+        if getattr(self, "_stopping", False):
+            return "◇", "Ember dimming · stopping"
         if not self.busy:
             return "◦", "Ember low · idle"
         if self._awaiting:
@@ -985,6 +1037,11 @@ class LexisVisor(App):
             ctx_pct=panels.context_percent(self.vault.messages()),
             turn_secs=turn_secs,
             queued=len(self.queue),
+            state_style=(
+                f"bold {flames.glow_color(self._typing_frame)}"
+                if self.busy and not self.reduced_motion else None
+            ),
+            width=status_w.size.width or 0,
         ))
 
     # ---------- composer / queue ----------
@@ -998,6 +1055,11 @@ class LexisVisor(App):
         self.submit_text(text)
 
     def submit_text(self, text: str) -> None:
+        if text.strip().lower() == "/stop":
+            # /stop is Esc's equal (Master, 2026-11-10): it acts
+            # now, never queues behind the work it must stop.
+            self.action_stop_work()
+            return
         if text.startswith("/"):
             if self.busy:
                 self.queue.append(("cmd", text))
@@ -1023,7 +1085,27 @@ class LexisVisor(App):
     def action_stop_work(self) -> None:
         if self.busy:
             self.stop_event.set()
-            self._post_note("Stopping at the next safe point…")
+            # Hermes /stop semantics in flame language (Master,
+            # 2026-11-10): stop this session's turn, drop this
+            # session's queued work only, and report the count.
+            dropped = len(self.queue)
+            self.queue.clear()
+            # The flame language for stopping: an eased dim to
+            # low ember over the fine clock's frames, never an
+            # instant disappearance.
+            self._dimming = 1
+            self._stopping = True
+            timer = getattr(self, "_flame_timer", None)
+            if timer is not None:
+                timer.resume()
+            self._refresh_status()
+            if dropped:
+                self._post_note(
+                    f"Stopping at the next safe point… "
+                    f"{dropped} queued item(s) dropped."
+                )
+            else:
+                self._post_note("Stopping at the next safe point…")
 
     def action_palette(self) -> None:
         def done(cmd):
@@ -1050,6 +1132,14 @@ class LexisVisor(App):
         self._turn_error = False
         self._streaming = False
         self._awaiting = False
+        # A new turn cancels any dim and lights the flame with
+        # an eased ramp from low ember.
+        self._dimming = 0
+        self._stopping = False
+        self._flame_level = 0.0
+        timer = getattr(self, "_flame_timer", None)
+        if timer is not None:
+            timer.resume()
 
     def _start_turn(self, text: str) -> None:
         self.busy = True
@@ -1137,7 +1227,15 @@ class LexisVisor(App):
         self._streaming = False
         self._awaiting = False
         self.last_reply = self._stream_buf
-        self.query_one("#typing", Static).remove_class("on")
+        if not getattr(self, "_dimming", 0) and not self.queue:
+            # Natural completion eases out too (Master, 2026-11-11):
+            # the flame leans down over the fine clock instead of
+            # cutting off. A queued next turn cancels the dim in
+            # _arm_turn_state and keeps the flame lit.
+            self._dimming = 1
+            timer = getattr(self, "_flame_timer", None)
+            if timer is not None:
+                timer.resume()
         if self._live is not None:
             self._finish_live()
         self.query_one("#writebar", ProgressBar).remove_class("on")
@@ -1153,6 +1251,10 @@ class LexisVisor(App):
             if kind == "msg":
                 self._start_turn(text)
             else:
+                # A queued command is not a turn: the flame rests
+                # unless the command itself starts one (a plan
+                # draft re-lights it in _arm_turn_state).
+                self.query_one("#typing", Static).remove_class("on")
                 self._run_slash(text)
             self._refresh_all()
 
@@ -1185,10 +1287,12 @@ class LexisVisor(App):
         self.call_from_thread(render)
 
     def _cb_first_token(self) -> None:
+        # The flame strip stays lit for the whole turn (locked
+        # flame language, Master 2026-11-10): streaming IS the
+        # typing state, so the first token must not retire the
+        # indicator. It turns off only when the turn finishes
+        # (or dims out after /stop).
         self._streaming = True
-        self.call_from_thread(
-            lambda: self.query_one("#typing", Static).remove_class("on")
-        )
 
     def _cb_ask(self, prompt: str) -> str:
         if self.always_write:
@@ -1264,6 +1368,11 @@ class LexisVisor(App):
     def _on_event_ui(self, kind: str, data: dict) -> None:
         name = data.get("name", "")
         path = data.get("path", "")
+        if kind == "tool_start":
+            self._tools_running = getattr(self, "_tools_running", 0) + 1
+        elif kind == "tool_end":
+            self._tools_running = max(
+                0, getattr(self, "_tools_running", 0) - 1)
         if kind == "tool_start":
             label = "Read file" if name == "read_file" else "Write file"
             card = ToolCard(f"{label} · {path}")
@@ -1366,25 +1475,22 @@ class LexisVisor(App):
             self._render_live()
             bar.update(progress=total)
             return
-        self._live_timer = self.set_interval(0.03, self._tick_live)
+        # No second clock (Master, 2026-11-11): the reveal rides
+        # the one fine flame clock, so code, particles and flame
+        # can never fight each other.
+        timer = getattr(self, "_flame_timer", None)
+        if timer is not None:
+            timer.resume()
 
-    def _tick_live(self) -> None:
-        if self._live is None:
-            return
+    def _advance_live(self) -> None:
+        """One reveal step, called from the flame clock."""
         live = self._live
-        step = max(live["total"] // 40, 1)
+        step = max(live["total"] // 28, 1)
         live["revealed"] = min(live["revealed"] + step, live["total"])
         self._render_live()
         self.query_one("#writebar", ProgressBar).update(
             progress=live["revealed"]
         )
-        if live["revealed"] >= live["total"]:
-            self._stop_live_timer()
-
-    def _stop_live_timer(self) -> None:
-        if self._live_timer is not None:
-            self._live_timer.stop()
-            self._live_timer = None
 
     def _render_live(self) -> None:
         if self._live is None:
@@ -1400,11 +1506,30 @@ class LexisVisor(App):
             f"   lines 1-{live['revealed']} of {live['total']}\n",
             style=FAINT,
         )
-        body = code_text(live["content"], reveal=live["revealed"])
-        head.append(body)
         if live["revealed"] < live["total"]:
-            head.append("█", style=EMBER)
-        self.query_one("#livecode", Static).update(head)
+            # Ember particles rise from the panel while it runs
+            # (locked flame language, 2026-11-10).
+            self._live_frame += 1
+            sparks = [" "] * 34
+            styles = {}
+            for col, row, glyph, color in flames.flame_rows(
+                    self._live_frame, width=34):
+                if row == 0 and col < 34:
+                    sparks[col] = glyph
+                    styles[col] = color
+            spark_line = Text(no_wrap=True, overflow="crop")
+            for i, ch in enumerate(sparks):
+                spark_line.append(
+                    ch, style=styles.get(i) if ch != " " else None)
+            head.append_text(spark_line)
+            head.append("\n")
+        body = code_text(live["content"], reveal=live["revealed"],
+                         path=live["path"])
+        if live["revealed"] < live["total"]:
+            renderable = Group(head, body, Text("█", style=EMBER))
+        else:
+            renderable = Group(head, body)
+        self.query_one("#livecode", Static).update(renderable)
 
     def _finish_live(self) -> None:
         if self._live is None:
@@ -1414,32 +1539,65 @@ class LexisVisor(App):
         self.query_one("#writebar", ProgressBar).update(
             progress=self._live["total"]
         )
-        self._stop_live_timer()
         self._live = None
 
     # ---------- typing indicator ----------
 
-    def _tick_typing(self) -> None:
-        if self.busy:
-            self._refresh_status()
+    def _tick_flames(self) -> None:
+        """One fine clock (~90 ms) drives every flame motion and
+        nothing else heavy: the full status strip refreshes only
+        every fifth tick. The flame level eases toward each
+        phase's target, so transitions and the /stop dim are
+        ramps the eye can follow (Master, 2026-11-11). The
+        timer pauses itself when nothing animates."""
         try:
             w = self.query_one("#typing", Static)
         except Exception:
             return  # screen is being torn down
-        if not w.has_class("on"):
+        dimming = bool(getattr(self, "_dimming", 0))
+        live_running = (
+            self._live is not None
+            and self._live["revealed"] < self._live["total"])
+        if not w.has_class("on") and not dimming and not live_running:
+            timer = getattr(self, "_flame_timer", None)
+            if timer is not None:
+                timer.pause()
+            return
+        if live_running:
+            self._advance_live()
+        if not w.has_class("on") and not dimming:
+            return  # only the live panel is animating
+        self._typing_frame += 1
+        f = self._typing_frame
+        if dimming:
+            target, label, phase = 0.0, "Lexis is stopping", "dimming"
+        elif self._awaiting:
+            target, label, phase = 0.85, "Lexis is held", "held"
+        elif self._streaming:
+            target, label, phase = 1.0, "Lexis is typing", "typing"
+        elif getattr(self, "_tools_running", 0):
+            target, label, phase = 1.0, "Lexis is working", "working"
+        else:
+            target, label, phase = 1.0, "Lexis is thinking", "thinking"
+        if self.reduced_motion:
+            self._flame_level = target
+        else:
+            self._flame_level += (target - self._flame_level) * 0.28
+        if dimming and self._flame_level < 0.05:
+            self._flame_level = 0.0
+            self._dimming = 0
+            self._stopping = False
+            w.remove_class("on")
+            self._refresh_status()
             return
         t = separator_text("LEXIS", "typing")
         t.append("\n")
-        if self.reduced_motion:
-            t.append("Lexis is typing...", style=AMBER)
-            w.update(t)
-            return
-        self._typing_frame += 1
-        f = self._typing_frame
-        flames = "🔥" * (1 + f % 3)
-        dots = "." * (1 + f % 3)
-        t.append(f"{flames} Lexis is typing{dots}", style=AMBER)
+        t.append_text(flames.typing_text(
+            f, label=label, intensity=self._flame_level,
+            reduced=self.reduced_motion, phase=phase))
         w.update(t)
+        if f % 5 == 0 and (self.busy or dimming):
+            self._refresh_status()
 
     # ---------- slash command preview ----------
 
@@ -1528,6 +1686,9 @@ class LexisVisor(App):
         parts = text.strip().split(maxsplit=1)
         cmd = parts[0].lower()
         arg = parts[1] if len(parts) > 1 else ""
+        if cmd == "/stop":
+            self.action_stop_work()
+            return
         if cmd == "/model":
             if arg:
                 if self.compass.select(arg):
@@ -1698,6 +1859,15 @@ class LexisVisor(App):
                 self._post_note("Plan cleared.")
             else:
                 self._start_plan_draft(arg)
+        elif cmd == "/start":
+            icon, label = self._work_state()
+            self._post_note(
+                f"Work session lit · session #{self.session_id} · "
+                f"{icon} {label}. Type a task, or /new for a clean "
+                "session."
+            )
+        elif cmd == "/new":
+            self._new_session()
         elif cmd == "/resume":
             self._resume_previous()
         elif cmd == "/cost":
@@ -1707,11 +1877,20 @@ class LexisVisor(App):
         elif cmd == "/doctor":
             self._run_self_check()
         elif cmd == "/skills":
-            self._post_note(
-                "No skills are installed yet. Installing skills from "
-                "GitHub and skills Lexis writes itself arrive with the "
-                "skills phase."
-            )
+            registry = getattr(self.pulse, "skills", None)
+            if registry is None or not registry.skills:
+                self._post_note("No skills are installed yet.")
+            else:
+                rows = [
+                    f"{r['slug']:<28} {r['status']}"
+                    for r in sorted(
+                        registry.skills.values(),
+                        key=lambda r: r["slug"])
+                ]
+                self._post_note(
+                    "Skills (active ones ride in the catalog):\n"
+                    + "\n".join(rows)
+                )
         elif cmd == "/orion":
             self._post_note(
                 "Orion joins through the ecosystem bridge in a later "
@@ -1727,6 +1906,31 @@ class LexisVisor(App):
             self._post_note(lines)
         else:
             self._post_note(f"Unknown command {cmd}. Type /help for the list.")
+        self._refresh_all()
+
+    def _new_session(self) -> None:
+        """Session cycle (Master, 2026-11-10): /new opens a clean
+        session with a NEW ledger id; old sessions stay untouched
+        in state.db and remain resumable."""
+        if self.busy:
+            self._post_note(
+                "Lexis is working. /stop first, then /new."
+            )
+            return
+        old_id = self.session_id
+        self.session_id = self.ledger.start_session(
+            self.compass.current)
+        self.vault.replace_all(self.vault.bootstrap())
+        for m in self.vault.messages():
+            self.ledger.append_message(
+                self.session_id, m["role"], m["content"])
+        self.pulse.session_id = self.session_id
+        self._chat().remove_children()
+        self._post_note(
+            f"New session lit · session #{self.session_id}. "
+            f"Session #{old_id} is untouched and resumable "
+            "with /resume."
+        )
         self._refresh_all()
 
     def _resume_previous(self) -> None:

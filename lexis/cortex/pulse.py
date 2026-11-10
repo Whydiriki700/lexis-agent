@@ -19,6 +19,7 @@ drafts under a tool-level write ban, then executes step by step.
 
 import hashlib
 import json
+import os
 import re
 import time
 
@@ -27,6 +28,28 @@ from . import forge as forge_mod
 from . import judge as judge_mod
 from . import prism
 from .warden import ALLOW, ASK, DENY
+
+CATALOG_MARK = "[SISTEM: Tool tambahan Lexis."
+
+CATALOG_TEXT = (
+    CATALOG_MARK + " Selain membaca dan menulis file, kamu punya "
+    "tool berikut. Pakai persis format penandanya, satu tool dalam "
+    "satu balasan, dan hasil tool kembali sebagai pesan [HASIL ...]:\n"
+    "[EDIT_FILE: path] teks lama [WITH] teks baru [/EDIT_FILE] "
+    "mengganti satu potongan file secara persis; teks lama harus "
+    "muncul tepat satu kali di file itu.\n"
+    "[SEARCH: pola :: folder] mencari pola di semua file teks "
+    "dalam folder; folder \".\" berarti folder kerja.\n"
+    "[LIST_DIR: path] melihat isi sebuah folder.\n"
+    "[RUN: perintah] menjalankan perintah terminal di folder "
+    "kerja, batas 60 detik; hasilnya berisi exit code dan output.\n"
+    "[RUN_TESTS: path] menjalankan rangkaian tes di folder itu.\n"
+    "[FETCH: url] mengambil isi halaman web sebagai teks.\n"
+    "[BROWSE: url] membuka halaman web beserta daftar tautan "
+    "bernomor untuk diikuti dengan FETCH atau BROWSE berikutnya.\n"
+    "Selesaikan tugas sampai tuntas dengan tool ini. Jangan "
+    "mengklaim hasil perintah atau tes tanpa menjalankannya.]"
+)
 
 
 class ThinkFilter:
@@ -96,6 +119,11 @@ class Pulse:
         self.plan_goal = ""
         self._turn_tools = []
         self._written_sigs = set()
+        # Optional skills registry (cortex.skills), set by the
+        # surface after construction; its catalog joins the tool
+        # catalog injection when present.
+        self.skills = None
+        self._catalog_sent = False
 
     def _event(self, kind: str, data: dict) -> None:
         if self.on_event is not None:
@@ -185,6 +213,253 @@ class Pulse:
             self.emit_line(f"  [SISTEM ERROR: {e}]\n")
             return "stopped"
 
+    def _ensure_catalog(self) -> None:
+        """Teach the extended toolset once per session. The persona
+        is never touched: the catalog rides as an engine system
+        notice in the conversation itself, in the same register as
+        the [HASIL ...] feedback the model already learns from.
+        A resumed session that already carries it is left alone."""
+        if self._catalog_sent:
+            return
+        self._catalog_sent = True
+        for m in self.vault.messages():
+            if CATALOG_MARK in (m.get("content") or ""):
+                return
+        text = CATALOG_TEXT
+        if self.skills is not None:
+            extra = self.skills.catalog_text()
+            if extra:
+                text = text + "\n" + extra
+        self.vault.add("user", text)
+        self.ledger.append_message(self.session_id, "user", text)
+
+    def _abs(self, path: str) -> str:
+        return path if os.path.isabs(path) else os.path.join(
+            self.root, path
+        )
+
+    def _run_extended_tools(self, full, started, model_used,
+                            prompt_tokens):
+        """Execute at most one extended tool marker from a reply.
+
+        Returns "tool_done" (feedback fed back, the completion
+        loop continues), "tool_stopped" (the warden or the owner
+        held it; the turn ends), or None (no extended marker).
+        Write and exec risks pass the same approval path as file
+        writes; read risks run directly, like file reads."""
+        spec = None
+        edit = forge_mod.find_edit_marker(full)
+        if edit is not None:
+            path, old, new = edit
+            spec = {
+                "name": "edit_file", "risk": "write",
+                "primary": path,
+                "preview": f"{old}\n->\n{new}",
+                "run": lambda: self.forge.call(
+                    "edit_file", path=path, old=old, new=new),
+                "ok_feedback": f"[HASIL EDIT FILE {path}]: "
+                               "potongan berhasil diganti.",
+                "detail": "passage replaced",
+            }
+        if spec is None:
+            command = forge_mod.find_line_marker(full, "RUN")
+            if command:
+                spec = {
+                    "name": "run_command", "risk": "exec",
+                    "primary": command, "preview": command,
+                    "run": lambda: self.forge.call(
+                        "run_command", command=command,
+                        cwd=self.root),
+                    "ok_feedback": f"[HASIL PERINTAH `{command}`]:\n"
+                                   "{result}",
+                    "detail": "command",
+                }
+        if spec is None:
+            target = forge_mod.find_bracket_marker(full, "RUN_TESTS")
+            if target:
+                path = self._abs(target)
+                spec = {
+                    "name": "run_tests", "risk": "exec",
+                    "primary": path, "preview": f"tests in {path}",
+                    "run": lambda: self.forge.call(
+                        "run_tests", path=path),
+                    "ok_feedback": f"[HASIL TES di {path}]:\n"
+                                   "{result}",
+                    "detail": "tests",
+                }
+        if spec is None:
+            query = forge_mod.find_line_marker(full, "SEARCH")
+            if query:
+                if "::" in query:
+                    pattern, root = (p.strip() for p in
+                                     query.split("::", 1))
+                else:
+                    pattern, root = query, "."
+                root = self._abs(root)
+                spec = {
+                    "name": "search_text", "risk": "read",
+                    "primary": pattern, "preview": pattern,
+                    "run": lambda: self.forge.call(
+                        "search_text", pattern=pattern, root=root),
+                    "ok_feedback": f"[HASIL PENCARIAN '{pattern}' "
+                                   f"di {root}]:\n{{result}}",
+                    "detail": "search",
+                }
+        if spec is None:
+            target = forge_mod.find_bracket_marker(full, "LIST_DIR")
+            if target:
+                path = self._abs(target)
+                spec = {
+                    "name": "list_dir", "risk": "read",
+                    "primary": path, "preview": path,
+                    "run": lambda: self.forge.call(
+                        "list_dir", path=path),
+                    "ok_feedback": f"[HASIL LIST {path}]:\n"
+                                   "{result}",
+                    "detail": "list",
+                }
+        if spec is None:
+            url = forge_mod.find_bracket_marker(full, "FETCH")
+            if url:
+                spec = {
+                    "name": "fetch_url", "risk": "read",
+                    "primary": url, "preview": url,
+                    "run": lambda: self.forge.call(
+                        "fetch_url", url=url),
+                    "ok_feedback": f"[HASIL AMBIL {url}]:\n"
+                                   "{result}",
+                    "detail": "fetch",
+                }
+        if spec is None:
+            url = forge_mod.find_bracket_marker(full, "BROWSE")
+            if url:
+                spec = {
+                    "name": "browse_page", "risk": "read",
+                    "primary": url, "preview": url,
+                    "run": lambda: self.forge.call(
+                        "browse_page", url=url),
+                    "ok_feedback": f"[HASIL BUKA {url}]:\n"
+                                   "{result}",
+                    "detail": "browse",
+                }
+        if spec is None:
+            slug = forge_mod.find_bracket_marker(full, "USE_SKILL")
+            if slug:
+                return self._use_skill(
+                    slug, started, model_used, prompt_tokens)
+            return None
+
+        name = spec["name"]
+        primary = spec["primary"]
+        if spec["risk"] in ("write", "exec"):
+            self.emit_line(
+                f"  [IZIN: Lexis ingin menjalankan {name} '{primary}']"
+            )
+            self._event("approval_needed", {
+                "name": name, "path": primary,
+                "content": spec["preview"],
+            })
+            decision = self.warden.decide(spec["risk"])
+            if decision == DENY:
+                self._turn_tools.append({
+                    "name": name, "ok": False, "path": primary,
+                    "detail": "held by plan mode",
+                })
+                self.emit_line(
+                    "  [SISTEM: Mode rencana aktif: tool ditahan.]\n"
+                )
+                return "tool_stopped"
+            allowed = decision == ALLOW or (
+                self.ask("  Izinkan? (y/n): ").lower() == "y"
+            )
+            if not allowed:
+                self._turn_tools.append({
+                    "name": name, "ok": False, "path": primary,
+                    "detail": "not approved",
+                })
+                self.emit_line("  [SISTEM: Dibatalkan.]\n")
+                return "tool_stopped"
+
+        self._event("tool_start", {"name": name, "path": primary})
+        t0 = time.time()
+        try:
+            result = spec["run"]()
+        except Exception as e:
+            self._event("tool_end", {
+                "name": name, "path": primary, "ok": False,
+                "detail": str(e), "duration": time.time() - t0,
+            })
+            self._turn_tools.append({
+                "name": name, "ok": False, "path": primary,
+                "detail": str(e),
+            })
+            feedback = f"[HASIL {name} {primary}: GAGAL: {e}]"
+            self.vault.add("user", feedback)
+            self.ledger.append_message(
+                self.session_id, "user", feedback
+            )
+            self.emit_line(f"  [SISTEM ERROR: {e}]\n")
+            self._finish("tool_done", started, model_used,
+                         prompt_tokens, full)
+            return "tool_done"
+        detail = spec["detail"]
+        if name in ("run_command", "run_tests"):
+            detail = str(result).splitlines()[0] if result else ""
+        self._event("tool_end", {
+            "name": name, "path": primary, "ok": True,
+            "detail": detail, "duration": time.time() - t0,
+        })
+        self._turn_tools.append({
+            "name": name, "ok": True, "path": primary,
+            "detail": detail,
+        })
+        feedback = spec["ok_feedback"].replace("{result}", str(result))
+        self.vault.add("user", feedback)
+        self.ledger.append_message(self.session_id, "user", feedback)
+        self.emit_line(f"  [SISTEM: {name} selesai.]\n")
+        self.ledger.append_event(
+            self.session_id, "tool", f"{name} {primary}"
+        )
+        self._finish("tool_done", started, model_used,
+                     prompt_tokens, full)
+        return "tool_done"
+
+    def _use_skill(self, slug, started, model_used, prompt_tokens):
+        """Load one active skill's body into the conversation
+        (progressive disclosure: the catalog carried only its
+        name and description until now)."""
+        body = self.skills.load_body(slug) if self.skills else None
+        self._event("tool_start", {"name": "use_skill", "path": slug})
+        if body is None:
+            self._event("tool_end", {
+                "name": "use_skill", "path": slug, "ok": False,
+                "detail": "skill not active", "duration": 0.0,
+            })
+            self._turn_tools.append({
+                "name": "use_skill", "ok": False, "path": slug,
+                "detail": "skill not active",
+            })
+            feedback = (f"[HASIL SKILL {slug}: GAGAL: skill tidak "
+                        "aktif atau tidak dikenal]")
+        else:
+            self._event("tool_end", {
+                "name": "use_skill", "path": slug, "ok": True,
+                "detail": "body loaded", "duration": 0.0,
+            })
+            self._turn_tools.append({
+                "name": "use_skill", "ok": True, "path": slug,
+                "detail": "body loaded",
+            })
+            feedback = f"[ISI SKILL {slug}]:\n{body}"
+            self.ledger.append_event(
+                self.session_id, "tool", f"use_skill {slug}"
+            )
+        self.vault.add("user", feedback)
+        self.ledger.append_message(self.session_id, "user", feedback)
+        self._finish("tool_done", started, model_used,
+                     prompt_tokens, "")
+        return "tool_done"
+
     def handle_turn(self, user_text: str) -> str:
         """Run one user turn as a completion loop: a file read or a
         successful write does not end the turn. The result is fed
@@ -195,6 +470,7 @@ class Pulse:
         after one write; the loop now covers writes too, so one
         instruction can finish a multi-file task. Every write
         still passes the warden and, in EMBER, the owner.)"""
+        self._ensure_catalog()
         self.vault.add("user", user_text)
         self.ledger.append_message(self.session_id, "user", user_text)
         learned = self.vault.learn_from(self.ledger, self.session_id, user_text)
@@ -210,7 +486,7 @@ class Pulse:
         actions = 0
         while True:
             outcome = self._turn_once(user_text)
-            if outcome not in ("file_read", "write_done"):
+            if outcome not in ("file_read", "write_done", "tool_done"):
                 return outcome
             actions += 1
             if actions >= 25:
@@ -363,6 +639,14 @@ class Pulse:
             # Stopped by a decision, or every marker duplicated
             # work already done this turn: the turn ends below
             # with the reply stored, like a finished turn.
+
+        tool_outcome = self._run_extended_tools(
+            full, started, model_used, prompt_tokens
+        )
+        if tool_outcome == "tool_done":
+            return "tool_done"
+        # "tool_stopped" (held or declined) and None (no extended
+        # marker) both end at the store below, like a finished turn.
 
         self.vault.add("assistant", full)
         self.ledger.append_message(self.session_id, "assistant", full)

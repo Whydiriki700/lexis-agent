@@ -128,6 +128,12 @@ def run_chat(argv) -> int:
         ask=lambda prompt: input(prompt),
         on_first_token=on_first_token,
     )
+    from lexis.cortex import skills as skills_mod
+
+    _slugs = skills_mod.sync_bundled(ROOT)
+    _registry = skills_mod.SkillRegistry(ROOT, ledger)
+    _registry.activate_bundled(_slugs)
+    pulse.skills = _registry
 
     print("=== LEXIS (HUMAN MODE) ===")
     print("Ketik 'exit' untuk keluar.\n")
@@ -140,6 +146,23 @@ def run_chat(argv) -> int:
             if not user_input.strip():
                 continue
             low = user_input.strip().lower()
+            if low == "/new":
+                old_id = session_id
+                session_id = ledger.start_session(compass.current)
+                vault.replace_all(vault.bootstrap())
+                for m in vault.messages():
+                    ledger.append_message(
+                        session_id, m["role"], m["content"])
+                pulse.session_id = session_id
+                print(
+                    f"[Sesi baru #{session_id} dimulai. Sesi "
+                    f"#{old_id} tetap tersimpan.]\n")
+                continue
+            if low == "/start":
+                print(
+                    f"[Sesi kerja #{session_id} menyala · model "
+                    f"{compass.current}]\n")
+                continue
             if low == "/model":
                 print("\nModel tersedia:")
                 for i, m in enumerate(MODELS, 1):

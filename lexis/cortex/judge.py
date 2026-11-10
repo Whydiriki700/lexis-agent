@@ -15,17 +15,25 @@ import os
 import re
 
 _READ_MARK = re.compile(r"\[READ_FILE:[^\]]*\]")
+_LINE_MARKS = re.compile(
+    r"\[(?:SEARCH|LIST_DIR|RUN|RUN_TESTS|FETCH|BROWSE|USE_SKILL)"
+    r":[^\n\]]*\]?"
+)
+_BLOCK_MARKS = ("[WRITE_FILE:", "[EDIT_FILE:")
 
 
 def visible_text(reply: str) -> str:
-    """What the user actually sees of a reply: the read markers
-    removed, everything from a write marker onward cut (the write
-    card and the approval screen carry that content instead). The
-    judge checks this text, never the raw protocol stream."""
+    """What the user actually sees of a reply: the single-line
+    markers removed, everything from a block marker onward cut
+    (the tool cards and the approval screen carry that content
+    instead). The judge checks this text, never the raw protocol
+    stream."""
     t = _READ_MARK.sub("", reply or "")
-    idx = t.find("[WRITE_FILE:")
-    if idx >= 0:
-        t = t[:idx]
+    t = _LINE_MARKS.sub("", t)
+    for mark in _BLOCK_MARKS:
+        idx = t.find(mark)
+        if idx >= 0:
+            t = t[:idx]
     return t
 
 
@@ -95,8 +103,11 @@ def verify_turn(reply: str, tools, root: str) -> Verdict:
     worked = any(t.get("ok") for t in tools or [])
     if not visible.strip() and not worked:
         fail("The reply came back empty.")
-    if ("[WRITE_FILE" in visible or "[READ_FILE" in visible
-            or "[/WRITE_FILE]" in visible):
+    if any(mark in visible for mark in (
+        "[WRITE_FILE", "[READ_FILE", "[/WRITE_FILE]", "[EDIT_FILE",
+        "[/EDIT_FILE]", "[SEARCH:", "[LIST_DIR:", "[RUN:",
+        "[RUN_TESTS:", "[FETCH:", "[BROWSE:", "[USE_SKILL:",
+    )):
         fail("Tool protocol leaked into the visible reply.")
     for t in tools or []:
         if not t.get("ok", True):

@@ -145,7 +145,7 @@ Screen {
 }
 
 #typing {
-    height: 2;
+    height: 3;
     display: none;
     color: $amber;
 }

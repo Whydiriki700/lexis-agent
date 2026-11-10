@@ -104,7 +104,10 @@ class TestForgeWarden(unittest.TestCase):
 
         f = Forge()
         self.assertEqual(
-            [s["name"] for s in f.schemas()], ["read_file", "write_file"]
+            [s["name"] for s in f.schemas()],
+            ["read_file", "write_file", "edit_file", "search_text",
+             "list_dir", "run_command", "run_tests", "fetch_url",
+             "browse_page"],
         )
         self.assertTrue(all("parameters" in s for s in f.schemas()))
         with tempfile.TemporaryDirectory() as d:
