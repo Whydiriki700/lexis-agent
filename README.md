@@ -22,14 +22,16 @@ the work as it happens, including code being written live in front of you.
 With pipx (recommended for most people):
 
 ```
-pipx install lexis
+pipx install lexis-agent
 ```
 
 With uv:
 
 ```
-uv tool install lexis
+uv tool install lexis-agent
 ```
+
+Either way, the command you run afterwards is `lexis`.
 
 A standalone Windows build for people who do not use Python is planned;
 until it is signed and published, use one of the two installs above.

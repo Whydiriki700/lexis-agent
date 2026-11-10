@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "lexis"
+name = "lexis-agent"
 version = "0.1.0"
 description = "Lexis Agent: AI agent CLI by Osvyn, powered by the Lexis Cortex."
 license = { text = "Apache-2.0" }
