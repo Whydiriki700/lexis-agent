@@ -49,6 +49,7 @@ from lexis.cortex.ledger import Ledger
 from lexis.cortex.pulse import Pulse
 from lexis.cortex.vault import Vault
 from lexis.cortex.warden import MODES, Warden
+from lexis.visor import clipboard as clipboard_mod
 from lexis.visor import panels
 from lexis.visor import flames
 from lexis.visor.icons import brain_fire_text, skull_fire_text
@@ -126,6 +127,35 @@ def _lexer_for(path) -> str:
         return "python"
     return _LEXER_BY_EXT.get(
         os.path.splitext(str(path))[1].lower(), "text")
+
+
+def _open_write(buf: str):
+    """The write marker still open in a streaming reply:
+    (path, body so far), or None. Mirrors forge's marker shape
+    ([WRITE_FILE: path] body [/WRITE_FILE])."""
+    start = buf.rfind("[WRITE_FILE:")
+    if start < 0:
+        return None
+    tail = buf[start:]
+    if "[/WRITE_FILE]" in tail:
+        return None
+    end = tail.find("]")
+    if end < 0:
+        return None
+    path = tail[len("[WRITE_FILE:"):end].strip()
+    body = tail[end + 1:]
+    if body.startswith("\n"):
+        body = body[1:]
+    return path, body
+
+
+_TOOL_LABELS = {
+    "read_file": "Read file", "write_file": "Write file",
+    "edit_file": "Edit file", "search_text": "Search",
+    "list_dir": "List folder", "run_command": "Run command",
+    "run_tests": "Run tests", "fetch_url": "Fetch page",
+    "browse_page": "Browse page", "use_skill": "Use skill",
+}
 
 
 def code_text(content: str, reveal=None, path=None) -> Syntax:
@@ -219,10 +249,72 @@ def separator_text(label: str, sub: str = "") -> Text:
     return t
 
 
+class EntryInput(Input):
+    """An Input with working clipboard keys (Master, 2026-11-11:
+    Ctrl+C copies, Ctrl+V pastes, Ctrl+X cuts, in every entry
+    without exception)."""
+
+    BINDINGS = [
+        Binding("ctrl+c", "clip_copy", "Copy"),
+        Binding("ctrl+v", "clip_paste", "Paste"),
+        Binding("ctrl+x", "clip_cut", "Cut"),
+    ]
+
+    def _selected(self) -> str:
+        start, end = self.selection.start, self.selection.end
+        if start == end:
+            return ""
+        return self.value[start:end]
+
+    def action_clip_copy(self) -> None:
+        clipboard_mod.set_text(self._selected() or self.value)
+
+    def action_clip_cut(self) -> None:
+        start, end = self.selection.start, self.selection.end
+        if start == end:
+            clipboard_mod.set_text(self.value)
+            self.value = ""
+            return
+        clipboard_mod.set_text(self.value[start:end])
+        self.value = self.value[:start] + self.value[end:]
+        self.cursor_position = start
+
+    def action_clip_paste(self) -> None:
+        text = clipboard_mod.get_text()
+        if not text:
+            return
+        start, end = self.selection.start, self.selection.end
+        self.value = self.value[:start] + text + self.value[end:]
+        self.cursor_position = start + len(text)
+
+
 class Composer(TextArea):
     """Enter sends, Shift+Enter makes a new line (mockup contract)."""
 
+    def _clip_copy(self, cut: bool = False) -> None:
+        selected = self.selected_text
+        clipboard_mod.set_text(selected or self.text)
+        if cut:
+            if selected:
+                start, end = self.selection
+                self.delete(start, end)
+            else:
+                self.clear()
+
+    def _clip_paste(self) -> None:
+        text = clipboard_mod.get_text()
+        if text:
+            self.replace(text, *self.selection)
+
     def _on_key(self, event) -> None:
+        if event.key in ("ctrl+c", "ctrl+v", "ctrl+x"):
+            event.prevent_default()
+            event.stop()
+            if event.key == "ctrl+v":
+                self._clip_paste()
+            else:
+                self._clip_copy(cut=event.key == "ctrl+x")
+            return
         active = getattr(self.app, "slash_menu_active", None)
         if active is not None and active():
             if event.key == "down":
@@ -332,7 +424,7 @@ class PaletteScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(classes="modalbox"):
             yield Static(separator_text("COMMANDS", "palette"))
-            yield Input(
+            yield EntryInput(
                 placeholder="Search commands, sessions, skills, files",
                 id="pal-q",
             )
@@ -416,12 +508,12 @@ class ProviderScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(classes="modalbox"):
             yield Static(separator_text("PROVIDER", "add new"))
-            yield Input(placeholder="Name, e.g. My Gateway", id="pv-name")
-            yield Input(
+            yield EntryInput(placeholder="Name, e.g. My Gateway", id="pv-name")
+            yield EntryInput(
                 placeholder="Base URL, e.g. https://api.example.com/v1",
                 id="pv-base",
             )
-            yield Input(
+            yield EntryInput(
                 placeholder="API key (stored in .env, never shown)",
                 id="pv-key", password=True,
             )
@@ -544,52 +636,6 @@ class InfernoScreen(ModalScreen):
         self.dismiss("stay")
 
 
-class ToolCard(Static):
-    def __init__(self, title: str) -> None:
-        super().__init__("", classes="card run")
-        self.title = title
-        self.set_running()
-
-    def set_running(self, note: str = "running…") -> None:
-        t = Text(no_wrap=True, overflow="ellipsis")
-        t.append("◌ ", style=EMBER)
-        t.append(self.title, style=f"bold {TXT}")
-        t.append(f"   {note}", style=FAINT)
-        self.update(t)
-
-    def set_waiting(self) -> None:
-        self.remove_class("run")
-        self.add_class("wait")
-        t = Text(no_wrap=True, overflow="ellipsis")
-        t.append("! ", style=AMBER)
-        t.append(self.title, style=f"bold {TXT}")
-        t.append("   waiting for your decision", style=FAINT)
-        self.update(t)
-
-    def set_done(self, ok: bool, detail: str, duration: float) -> None:
-        self.remove_class("run", "wait")
-        self.add_class("ok" if ok else "run")
-        # The duration sits at the card's right edge (Master,
-        # 2026-11-10: one neat grid, durations right-aligned);
-        # long titles and details cut with an ellipsis instead of
-        # wrapping ragged.
-        head = ("✓ " if ok else "✗ ") + self.title
-        dur = f"{duration:.1f} s"
-        try:
-            width = self.content_region.width or 80
-        except Exception:
-            width = 80
-        pad = max(2, width - len(head) - len(dur))
-        t = Text(no_wrap=True, overflow="ellipsis")
-        t.append("✓ " if ok else "✗ ", style=GREEN if ok else RED)
-        t.append(self.title, style=f"bold {TXT}")
-        t.append(" " * pad, style=FAINT)
-        t.append(dur, style=FAINT)
-        if detail:
-            t.append(f"\n{detail}", style=DIM)
-        self.update(t)
-
-
 class BootScreen(Screen):
     """Startup reveal (Master's decision, 2026-11-10): opening Lexis
     is a moment, not a flash. The banner assembles line by line
@@ -675,7 +721,9 @@ class BootScreen(Screen):
 class LexisVisor(App):
     CSS_PATH = "theme.tcss"
     BINDINGS = [
-        Binding("ctrl+k", "palette", "Palette"),
+        # Priority: the composer's editor keymap also claims
+        # ctrl+k, and the palette must win from every entry.
+        Binding("ctrl+k", "palette", "Palette", priority=True),
         Binding("escape", "stop_work", "Stop"),
     ]
 
@@ -721,8 +769,9 @@ class LexisVisor(App):
         self._turn_started = None
         self._cost_cache = (0, 0, None, None)
         self._stream_widget = None
-        self._cards = {}
         self._approval_data = None
+        self._live_stream = None
+        self._activity_current = None
         self._approval_event = None
         self._approval_result = "reject"
         self._typing_frame = 0
@@ -835,6 +884,7 @@ class LexisVisor(App):
                     yield Static(banner_text(), id="banner")
                     yield Static(id="welcome")
                 yield VerticalScroll(id="chat")
+                yield Static(id="activity")
                 yield Static(id="livecode")
                 yield ProgressBar(
                     id="writebar", total=100, show_eta=False,
@@ -872,6 +922,57 @@ class LexisVisor(App):
 
     def _chat(self) -> VerticalScroll:
         return self.query_one("#chat", VerticalScroll)
+
+    def _follow_tail(self) -> None:
+        """Keep the conversation tail in view while surfaces
+        below the chat grow, but never yank a reader who has
+        scrolled up on purpose."""
+        try:
+            chat = self._chat()
+        except Exception:
+            return
+        if chat.scroll_y >= chat.max_scroll_y - 3:
+            chat.scroll_end(animate=False)
+
+    # ---------- activity strip (outside the chat) ----------
+
+    def _activity(self, text) -> None:
+        try:
+            w = self.query_one("#activity", Static)
+        except Exception:
+            return
+        if text is None:
+            w.remove_class("on")
+            return
+        w.update(text)
+        w.add_class("on")
+
+    def _activity_running(self, label: str, target: str) -> None:
+        self._activity_current = (label, target)
+        t = Text(no_wrap=True, overflow="ellipsis")
+        t.append("◌ ", style=EMBER)
+        t.append(f"{label} · {target}", style=f"bold {TXT}")
+        t.append("   running…", style=FAINT)
+        self._activity(t)
+
+    def _activity_waiting(self) -> None:
+        label, target = self._activity_current or ("Write file", "")
+        t = Text(no_wrap=True, overflow="ellipsis")
+        t.append("! ", style=AMBER)
+        t.append(f"{label} · {target}", style=f"bold {TXT}")
+        t.append("   waiting for your decision", style=FAINT)
+        self._activity(t)
+
+    def _activity_done(self, ok: bool, detail: str,
+                       duration: float) -> None:
+        label, target = self._activity_current or ("Tool", "")
+        t = Text(no_wrap=True, overflow="ellipsis")
+        t.append("✓ " if ok else "✗ ", style=GREEN if ok else RED)
+        t.append(f"{label} · {target}", style=f"bold {TXT}")
+        if detail:
+            t.append(f" — {detail}", style=DIM)
+        t.append(f" · {duration:.1f} s", style=FAINT)
+        self._activity(t)
 
     def _post(self, widget) -> None:
         chat = self._chat()
@@ -1108,6 +1209,9 @@ class LexisVisor(App):
                 self._post_note("Stopping at the next safe point…")
 
     def action_palette(self) -> None:
+        if self.screen.__class__.__name__ == "PaletteScreen":
+            return
+
         def done(cmd):
             if cmd:
                 self.submit_text(cmd)
@@ -1263,6 +1367,11 @@ class LexisVisor(App):
     def _cb_token(self, token: str) -> None:
         self._stream_buf += token
         buf = self._stream_buf
+        # Truly live coding (Master, 2026-11-11): a write marker
+        # that is still open in the stream IS the file being
+        # born; the panel follows the stream itself, not a
+        # replay after the fact.
+        self._live_stream = _open_write(buf)
 
         def render():
             if self._stream_widget is not None:
@@ -1302,9 +1411,7 @@ class LexisVisor(App):
         self._approval_result = "reject"
 
         def show():
-            card = self._cards.get("write_file")
-            if card is not None:
-                card.set_waiting()
+            self._activity_waiting()
 
             def done(choice):
                 if choice == "always":
@@ -1374,20 +1481,19 @@ class LexisVisor(App):
             self._tools_running = max(
                 0, getattr(self, "_tools_running", 0) - 1)
         if kind == "tool_start":
-            label = "Read file" if name == "read_file" else "Write file"
-            card = ToolCard(f"{label} · {path}")
-            self._cards[name] = card
-            self._post(card)
+            # Tool status lives on its own strip, never in the
+            # chat (Master, 2026-11-11; Hermes keeps it separate
+            # and so do we now).
+            label = _TOOL_LABELS.get(name, name)
+            self._activity_running(label, path)
             self.plan_steps.append(("now", f"{label} {os.path.basename(path)}"))
             if name == "write_file":
                 self._start_live(path, data.get("content", ""))
         elif kind == "tool_end":
-            card = self._cards.pop(name, None)
-            if card is not None:
-                card.set_done(
-                    bool(data.get("ok")), data.get("detail", ""),
-                    float(data.get("duration", 0.0)),
-                )
+            self._activity_done(
+                bool(data.get("ok")), data.get("detail", ""),
+                float(data.get("duration", 0.0)),
+            )
             self.plan_steps = [
                 ("done" if s == "now" else s, lbl)
                 for s, lbl in self.plan_steps
@@ -1461,36 +1567,65 @@ class LexisVisor(App):
     # ---------- live coding ----------
 
     def _start_live(self, path: str, content: str) -> None:
+        """Execution-time entry for a write. If the panel is
+        already streaming this file from the model's reply, the
+        stream is adopted and completed with the authoritative
+        content; otherwise the finished content appears whole.
+        There is no replay reveal anymore (Master, 2026-11-11):
+        live means streamed, not staged."""
+        live = self._live
+        if (live is not None and live["path"] == path
+                and live.get("streaming")):
+            if content:
+                live["content"] = content
+            live["streaming"] = False
+            live["total"] = max(
+                len(live["content"].split("\n")), 1)
+            live["revealed"] = live["total"]
+            bar = self.query_one("#writebar", ProgressBar)
+            bar.update(total=live["total"], progress=live["total"])
+            bar.add_class("on")
+            self._render_live()
+            self._follow_tail()
+            return
         total = max(len(content.split("\n")), 1)
         self._live = {
-            "path": path, "content": content, "revealed": 0, "total": total,
+            "path": path, "content": content, "revealed": total,
+            "total": total, "streaming": False,
         }
         box = self.query_one("#livecode", Static)
         box.add_class("on")
         bar = self.query_one("#writebar", ProgressBar)
-        bar.update(total=total, progress=0)
+        bar.update(total=total, progress=total)
         bar.add_class("on")
-        if self.reduced_motion:
-            self._live["revealed"] = total
-            self._render_live()
-            bar.update(progress=total)
-            return
-        # No second clock (Master, 2026-11-11): the reveal rides
-        # the one fine flame clock, so code, particles and flame
-        # can never fight each other.
-        timer = getattr(self, "_flame_timer", None)
-        if timer is not None:
-            timer.resume()
-
-    def _advance_live(self) -> None:
-        """One reveal step, called from the flame clock."""
-        live = self._live
-        step = max(live["total"] // 28, 1)
-        live["revealed"] = min(live["revealed"] + step, live["total"])
         self._render_live()
-        self.query_one("#writebar", ProgressBar).update(
-            progress=live["revealed"]
-        )
+        self._follow_tail()
+
+    def _sync_live_stream(self) -> None:
+        """Follow the model's stream: while a write marker is
+        open in the reply, the panel shows the file exactly as
+        far as the stream has produced it. Runs on the flame
+        clock (one clock for everything, no fighting)."""
+        stream = self._live_stream
+        if stream is None:
+            return
+        path, body = stream
+        live = self._live
+        if (live is None or live["path"] != path
+                or not live.get("streaming")):
+            self._live = {
+                "path": path, "content": body, "revealed": 0,
+                "total": 1, "streaming": True,
+            }
+            self.query_one("#livecode", Static).add_class("on")
+        else:
+            live["content"] = body
+        live = self._live
+        lines = max(len(body.split("\n")), 1)
+        live["total"] = lines
+        live["revealed"] = lines
+        self._render_live()
+        self._follow_tail()
 
     def _render_live(self) -> None:
         if self._live is None:
@@ -1502,11 +1637,17 @@ class LexisVisor(App):
         head.append("\n")
         head.append("● LIVE CODING  ", style=f"bold {AMBER}")
         head.append(os.path.basename(live["path"]), style=f"bold {TXT}")
-        head.append(
-            f"   lines 1-{live['revealed']} of {live['total']}\n",
-            style=FAINT,
-        )
-        if live["revealed"] < live["total"]:
+        if live.get("streaming"):
+            head.append(
+                f"   streaming · {live['revealed']} lines so far\n",
+                style=FAINT,
+            )
+        else:
+            head.append(
+                f"   lines 1-{live['revealed']} of {live['total']}\n",
+                style=FAINT,
+            )
+        if live.get("streaming"):
             # Ember particles rise from the panel while it runs
             # (locked flame language, 2026-11-10).
             self._live_frame += 1
@@ -1525,7 +1666,7 @@ class LexisVisor(App):
             head.append("\n")
         body = code_text(live["content"], reveal=live["revealed"],
                          path=live["path"])
-        if live["revealed"] < live["total"]:
+        if live.get("streaming"):
             renderable = Group(head, body, Text("█", style=EMBER))
         else:
             renderable = Group(head, body)
@@ -1534,6 +1675,7 @@ class LexisVisor(App):
     def _finish_live(self) -> None:
         if self._live is None:
             return
+        self._live["streaming"] = False
         self._live["revealed"] = self._live["total"]
         self._render_live()
         self.query_one("#writebar", ProgressBar).update(
@@ -1555,16 +1697,17 @@ class LexisVisor(App):
         except Exception:
             return  # screen is being torn down
         dimming = bool(getattr(self, "_dimming", 0))
-        live_running = (
-            self._live is not None
-            and self._live["revealed"] < self._live["total"])
-        if not w.has_class("on") and not dimming and not live_running:
+        live_streaming = (
+            self._live is not None and self._live.get("streaming"))
+        if self._live_stream is not None:
+            live_streaming = True
+        if live_streaming:
+            self._sync_live_stream()
+        if not w.has_class("on") and not dimming and not live_streaming:
             timer = getattr(self, "_flame_timer", None)
             if timer is not None:
                 timer.pause()
             return
-        if live_running:
-            self._advance_live()
         if not w.has_class("on") and not dimming:
             return  # only the live panel is animating
         self._typing_frame += 1

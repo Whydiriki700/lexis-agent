@@ -131,6 +131,17 @@ Screen {
     border-left: thick $amber;
 }
 
+#activity {
+    height: 1;
+    display: none;
+    padding: 0 1;
+    color: $dim;
+}
+
+#activity.on {
+    display: block;
+}
+
 #livecode {
     border: solid $line;
     background: #0a0806;

@@ -388,14 +388,13 @@ class MasterFixBatchTest(unittest.IsolatedAsyncioTestCase):
                     strip = str(app.query_one("#status").render())
                     self.assertIn("linked", strip)
                     self.assertIn("Session cost", strip)
-                    # finished cards leave _cards (in-flight only);
-                    # the widget itself stays in the chat flow
-                    cards = app.query(".card")
-                    self.assertTrue(cards)
-                    first = str(cards[-1].render()).splitlines()[0]
-                    # duration right-aligned at the card's edge
-                    self.assertTrue(first.endswith("s"))
-                    self.assertGreaterEqual(len(first), 60)
+                    # Tool status lives on the activity strip,
+                    # never as a card inside the chat (Master,
+                    # 2026-11-11).
+                    self.assertFalse(app.query(".card"))
+                    activity = str(
+                        app.query_one("#activity").render())
+                    self.assertIn("Write file", activity)
             finally:
                 bridge.stream_chat = orig
 
@@ -672,7 +671,10 @@ class SyntaxLiveTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("#0a0806",
                          FoxfireSyntaxStyle.background_color)
 
-    async def test_reveal_rides_the_flame_clock(self):
+    async def test_finished_write_shows_whole_no_replay(self):
+        # Master, 2026-11-11: live coding must be truly live,
+        # never a staged replay. A finished write handed to the
+        # panel shows whole, at once, with no timer behind it.
         with tempfile.TemporaryDirectory() as d:
             app = LexisVisor(root=d)
             async with app.run_test(size=(120, 40)) as pilot:
@@ -680,13 +682,114 @@ class SyntaxLiveTest(unittest.IsolatedAsyncioTestCase):
                 app._start_live(
                     "big.py",
                     "\n".join(f"line_{i} = {i}" for i in range(60)))
-                first = app._live["revealed"]
-                await pilot.pause(0.6)
-                second = app._live["revealed"]
-                self.assertGreater(second, first)
+                self.assertEqual(60, app._live["revealed"])
+                self.assertEqual(60, app._live["total"])
+                self.assertFalse(app._live["streaming"])
                 self.assertFalse(hasattr(app, "_live_timer"))
                 app._finish_live()
                 self.assertIsNone(app._live)
+
+
+class LiveStreamTest(unittest.IsolatedAsyncioTestCase):
+    """Live coding is the stream itself (Master, 2026-11-11):
+    while the model is still writing the marker, the panel
+    already shows the file as far as it exists."""
+
+    async def test_panel_follows_the_stream(self):
+        import time as _time
+
+        orig = bridge.stream_chat
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "streamed.py")
+
+            def fake(model, messages, key):
+                yield (
+                    "Writing it now.\n[WRITE_FILE: "
+                    + target + "]\nline one\n"
+                )
+                _time.sleep(0.8)
+                yield "line two\n"
+                _time.sleep(0.8)
+                yield "line three\n[/WRITE_FILE]\ndone"
+
+            bridge.stream_chat = fake
+            try:
+                app = LexisVisor(root=d)
+                app.always_write = True
+                async with app.run_test(size=(130, 48)) as pilot:
+                    await pilot.pause()
+                    app.submit_text("write the file")
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: app._live is not None
+                            and app._live.get("streaming")
+                            and "line one"
+                            in app._live["content"]
+                        ),
+                        "panel never followed the stream",
+                    )
+                    self.assertTrue(
+                        await wait_for(lambda: not app.busy),
+                        "turn did not finish",
+                    )
+                    await pilot.pause()
+                    with open(target, encoding="utf-8") as f:
+                        self.assertIn("line three", f.read())
+                    activity = str(
+                        app.query_one("#activity").render())
+                    self.assertIn("Write file", activity)
+                    self.assertIn("✓", activity)
+                    self.assertNotIn("Write file ·",
+                                     chat_text(app))
+            finally:
+                bridge.stream_chat = orig
+
+
+class ClipboardTest(unittest.IsolatedAsyncioTestCase):
+    """Ctrl+C / Ctrl+V / Ctrl+X in every entry (Master,
+    2026-11-11, without exception)."""
+
+    def test_clipboard_roundtrip_when_available(self):
+        from lexis.visor import clipboard as cb
+
+        if not cb.set_text("lexis-clip-probe"):
+            self.skipTest("no clipboard in this session")
+        self.assertEqual("lexis-clip-probe", cb.get_text())
+
+    async def test_keys_work_in_composer_and_palette_input(self):
+        from lexis.visor import clipboard as cb
+
+        store = {"text": "PASTED-TOKEN"}
+        orig_get, orig_set = cb.get_text, cb.set_text
+        cb.get_text = lambda: store["text"]
+        cb.set_text = (
+            lambda t: store.__setitem__("text", t) or True)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await pilot.pause(1.5)
+                    composer = app.query_one("#composer")
+                    composer.focus()
+                    await pilot.press("ctrl+v")
+                    await pilot.pause()
+                    self.assertIn("PASTED-TOKEN", composer.text)
+                    await pilot.press("ctrl+a")
+                    await pilot.press("ctrl+c")
+                    self.assertEqual("PASTED-TOKEN", store["text"])
+                    await pilot.press("ctrl+x")
+                    await pilot.pause()
+                    self.assertEqual("", composer.text)
+                    await pilot.press("ctrl+k")
+                    await pilot.pause()
+                    entry = app.screen.query_one("#pal-q")
+                    entry.focus()
+                    store["text"] = "help"
+                    await pilot.press("ctrl+v")
+                    await pilot.pause()
+                    self.assertIn("help", entry.value)
+        finally:
+            cb.get_text, cb.set_text = orig_get, orig_set
 
 
 if __name__ == "__main__":
