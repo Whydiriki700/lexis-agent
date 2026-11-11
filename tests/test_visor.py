@@ -925,6 +925,84 @@ class VisorCopyTest(unittest.IsolatedAsyncioTestCase):
             _clip.set_text = old_set
             _bridge.stream_chat = old_stream
 
+    async def test_ctrl_c_prefers_screen_selection(self):
+        """Focus sits in the composer while the owner selects
+        conversation text with the mouse; Ctrl+C must copy
+        the screen selection, not the empty composer
+        (Master, 2026-11-11: copy still felt broken after
+        the first fix)."""
+        from lexis.visor import clipboard as _clip
+
+        captured = []
+        old_set = _clip.set_text
+        _clip.set_text = lambda text: captured.append(text) or True
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(130, 48)) as pilot:
+                    await pilot.pause()
+                    from lexis.visor.app import Composer
+
+                    app.query_one("#composer", Composer).focus()
+                    app.screen.get_selected_text = (
+                        lambda: "teks hasil seleksi")
+                    await pilot.press("ctrl+c")
+                    await pilot.pause()
+                    self.assertEqual(
+                        ["teks hasil seleksi"], captured)
+        finally:
+            _clip.set_text = old_set
+
+
+class ApprovalLayoutTest(unittest.IsolatedAsyncioTestCase):
+    """Master's screenshot (2026-11-11): with a long diff the
+    approval modal's buttons were pushed out of the box and
+    the owner had no way to answer. The diff now scrolls in
+    its own region; the buttons must stay on screen even on
+    a short terminal, and the diff itself must be copyable."""
+
+    async def test_buttons_stay_visible_with_long_diff(self):
+        from textual.widgets import Button
+
+        from lexis.visor.app import ApprovalScreen
+
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "code.py")
+            with open(target, "w", encoding="utf-8") as f:
+                f.write("\n".join(
+                    f"line {i} = {i}" for i in range(80)) + "\n")
+            app = LexisVisor(root=d)
+            async with app.run_test(size=(100, 24)) as pilot:
+                await pilot.pause()
+                self.assertTrue(
+                    app.query_one("#livecode").allow_select,
+                    "the live panel is not selectable",
+                )
+                new = "\n".join(
+                    f"line {i} = {i + 1000}"
+                    for i in range(80)) + "\n"
+                app.push_screen(ApprovalScreen(target, new))
+                await pilot.pause()
+                self.assertEqual(
+                    "ApprovalScreen",
+                    app.screen.__class__.__name__)
+                for bid in ("#approve", "#reject"):
+                    btn = app.screen.query_one(bid, Button)
+                    self.assertLessEqual(
+                        btn.region.bottom, app.size.height,
+                        f"{bid} is pushed off screen")
+                    self.assertGreaterEqual(btn.region.y, 0)
+                statics = app.screen.query(".diffscroll Static")
+                self.assertTrue(len(statics) > 0)
+                self.assertTrue(
+                    all(w.allow_select for w in statics),
+                    "the diff is not selectable")
+                app.screen.query_one("#approve", Button).press()
+                await pilot.pause()
+                self.assertNotEqual(
+                    "ApprovalScreen",
+                    app.screen.__class__.__name__)
+
 
 class VisorEvolveTest(unittest.IsolatedAsyncioTestCase):
     """Step 3 surfaces: /evolve refuses without verified work,

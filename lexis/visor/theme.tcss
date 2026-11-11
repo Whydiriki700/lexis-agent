@@ -178,6 +178,11 @@ Screen {
     height: auto;
 }
 
+.diffscroll {
+    height: 1fr;
+    min-height: 3;
+}
+
 ApprovalScreen, PaletteScreen, PickScreen {
     align: center middle;
     background: rgba(0, 0, 0, 0.55);

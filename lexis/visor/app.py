@@ -334,6 +334,20 @@ class Composer(TextArea):
 
     def _clip_copy(self, cut: bool = False) -> None:
         selected = self.selected_text
+        if not selected and not cut:
+            # The composer keeps keyboard focus even while
+            # the owner selects conversation text with the
+            # mouse, so a plain Ctrl+C landed here and copied
+            # the (often empty) composer instead of the text
+            # on screen (Master, 2026-11-11: copy still felt
+            # broken). A live screen selection wins.
+            try:
+                screen_text = self.app.screen.get_selected_text()
+            except Exception:
+                screen_text = ""
+            if screen_text:
+                clipboard_mod.set_text(screen_text)
+                return
         clipboard_mod.set_text(selected or self.text)
         if cut:
             if selected:
@@ -444,11 +458,17 @@ class ApprovalScreen(ModalScreen):
                 yield Static(Text(self.warning,
                                   style=f"bold {AMBER}"))
             yield Static(desc)
-            if old:
-                yield Static(diff_text(old, self.content))
-            else:
-                yield Static(code_text(
-                    self.content, reveal=80, path=self.path))
+            # The diff lives in its own scroll region: however
+            # long the change, the buttons below stay inside
+            # the box (Master's screenshot, 2026-11-11: a long
+            # diff pushed Approve/Reject off the modal and the
+            # owner was stuck with no way to answer).
+            with VerticalScroll(classes="diffscroll"):
+                if old:
+                    yield Static(diff_text(old, self.content))
+                else:
+                    yield Static(code_text(
+                        self.content, reveal=80, path=self.path))
             yield Static(undo)
             with Horizontal():
                 yield Button("Approve", id="approve", variant="primary")
@@ -1043,15 +1063,13 @@ class LexisVisor(App):
         self._activity(t)
 
     def _post(self, widget) -> None:
+        # Conversation text is selectable with the mouse:
+        # Textual widgets allow selection by default
+        # (ALLOW_SELECT is True and allow_select is a
+        # read-only property; verified on the PC venv,
+        # 2026-11-11). Ctrl+Shift+C copies the selection;
+        # /copy covers the keyboard-only path.
         chat = self._chat()
-        try:
-            # Conversation text is selectable with the mouse
-            # (Master's bug, 2026-11-11: nothing on screen
-            # could be copied out). Ctrl+Shift+C copies the
-            # selection; /copy covers the keyboard-only path.
-            widget.allow_select = True
-        except Exception:
-            pass
         chat.mount(widget)
         chat.scroll_end(animate=False)
 
