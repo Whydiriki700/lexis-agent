@@ -49,8 +49,11 @@ from lexis.cortex.ledger import Ledger
 from lexis.cortex.pulse import Pulse
 from lexis.cortex.vault import Vault
 from lexis.cortex.warden import MODES, Warden
+from lexis.visor import banner as banner_mod
 from lexis.visor import clipboard as clipboard_mod
 from lexis.visor import panels
+from lexis.visor import prefs as visor_prefs
+from lexis.visor import themes as themes_mod
 from lexis.visor import flames
 from lexis.visor.icons import brain_fire_text, skull_fire_text
 from lexis.visor.banner import (
@@ -82,6 +85,8 @@ PALETTE_COMMANDS = [
     ("/evolve", "draft a new skill from this session's verified work", "—"),
     ("/copy", "copy the last reply, or /copy all for the conversation", "Ctrl+Shift+C"),
     ("/mode", "switch compliance mode: EMBER · BLAZE · INFERNO", "Ctrl+."),
+    ("/term", "terminal display: front end streams live, back end shows the result only", "—"),
+    ("/theme", "switch theme: Foxfire Ember or Kitsune Azure", "—"),
     ("/plan", "plan first, act after approval", "Ctrl+P"),
     ("/stop", "stop the current work, the flame dims to low ember", "Esc"),
     ("/new", "open a clean new session, the old one stays untouched", "—"),
@@ -199,19 +204,51 @@ def _plain_reason(reason: str) -> str:
     return r
 
 
+class AzureSyntaxStyle(PygmentsStyle):
+    """The Kitsune Azure syntax theme (Master, 2026-11-10):
+    the Foxfire style answered in blue, on the azure
+    panel's own deep background."""
+
+    background_color = "#05080f"
+    default_style = ""
+    styles = {
+        PygText: "#e6f2ff",
+        Comment: "italic #5b7bab",
+        Keyword: "bold #38bdf8",
+        Keyword.Constant: "#7dd3fc",
+        Name.Function: "#e0f2fe",
+        Name.Class: "#e0f2fe",
+        Name.Builtin: "#bae6fd",
+        Name.Decorator: "#7dd3fc",
+        String: "#9ccc8f",
+        Number: "#7dd3fc",
+        Operator: "#93c5fd",
+        Error: "#ff6b4a",
+    }
+
+
+_SYNTAX_THEMES = {
+    "foxfire-ember": (FoxfireSyntaxStyle, "#0a0806"),
+    "kitsune-azure": (AzureSyntaxStyle, "#05080f"),
+}
+_syntax_active = "foxfire-ember"
+
+
 def code_text(content: str, reveal=None, path=None) -> Syntax:
     """Real syntax highlighting (Rich Syntax + Pygments, Master
-    2026-11-11) with line numbers, Foxfire theme. reveal limits
-    the render to the first N lines for the live reveal."""
+    2026-11-11) with line numbers, in the active theme's
+    style. reveal limits the render to the first N lines
+    for the live reveal."""
     lines = content.split("\n")
     if reveal is not None:
         lines = lines[:reveal]
+    style, bg = _SYNTAX_THEMES[_syntax_active]
     return Syntax(
         "\n".join(lines),
         _lexer_for(path),
-        theme=FoxfireSyntaxStyle,
+        theme=style,
         line_numbers=True,
-        background_color="#0a0806",
+        background_color=bg,
         word_wrap=False,
     )
 
@@ -225,6 +262,23 @@ _MARKER_HEADS = (
     "[READ_FILE:", "[WRITE_FILE:", "[EDIT_FILE:", "[SEARCH:",
     "[LIST_DIR:", "[RUN:", "[RUN_TESTS:", "[FETCH:", "[BROWSE:",
     "[USE_SKILL:",
+)
+# The angle dialect (Master's session, 2026-11-11: the model
+# wrote <LIST_DIR: workspace> and the raw markup reached the
+# screen). Protocol is kitchen language in every dialect.
+_TAGS = (
+    "READ_FILE", "WRITE_FILE", "EDIT_FILE", "SEARCH", "LIST_DIR",
+    "RUN", "RUN_TESTS", "FETCH", "BROWSE", "USE_SKILL",
+)
+_ANGLE_READ_RE = re.compile(r"<READ_FILE:\s*[^>]*>?")
+_ANGLE_LINE_MARKER_RE = re.compile(
+    r"<(?:SEARCH|LIST_DIR|RUN|RUN_TESTS|FETCH|BROWSE|USE_SKILL)"
+    r":[^\n>]*>?")
+_ANGLE_CLOSE_RE = re.compile(
+    r"</(?:" + "|".join(_TAGS) + r")>")
+_ANGLE_HEADS = (
+    tuple(f"<{t}:" for t in _TAGS)
+    + tuple(f"</{t}>" for t in _TAGS)
 )
 
 
@@ -245,6 +299,21 @@ def display_text(buf: str) -> str:
         if "]" not in tail and any(
             head.startswith(tail) or tail.startswith(head)
             for head in _MARKER_HEADS
+        ):
+            buf = buf[:i]
+    buf = _ANGLE_READ_RE.sub("", buf)
+    buf = _ANGLE_LINE_MARKER_RE.sub("", buf)
+    buf = _ANGLE_CLOSE_RE.sub("", buf)
+    for head in ("<WRITE_FILE:", "<EDIT_FILE:"):
+        idx = buf.find(head)
+        if idx != -1:
+            buf = buf[:idx]
+    i = buf.rfind("<")
+    if i != -1:
+        tail = buf[i:]
+        if ">" not in tail and any(
+            head.startswith(tail) or tail.startswith(head)
+            for head in _ANGLE_HEADS
         ):
             buf = buf[:i]
     return buf
@@ -798,23 +867,43 @@ class LexisVisor(App):
         super().__init__()
         from textual.theme import Theme
 
-        self.register_theme(
-            Theme(
-                name="foxfire-ember",
-                primary="#ff7a29",
-                accent="#e0a83c",
-                background="#0c0a08",
-                surface="#171310",
-                panel="#100d0a",
-                foreground="#e8ded2",
-                success="#3fb96f",
-                warning="#e0a83c",
-                error="#e05c5c",
-                dark=True,
+        for _name, _spec in themes_mod.THEMES.items():
+            self.register_theme(
+                Theme(
+                    name=_name,
+                    primary=_spec["primary"],
+                    accent=_spec["accent"],
+                    background=_spec["background"],
+                    surface=_spec["surface"],
+                    panel=_spec["panel"],
+                    foreground=_spec["foreground"],
+                    success="#3fb96f",
+                    warning=_spec["accent"],
+                    error="#e05c5c",
+                    dark=True,
+                    variables=dict(_spec["css"]),
+                )
             )
-        )
-        self.theme = "foxfire-ember"
+        self.theme = themes_mod.DEFAULT
+        self._theme_name = themes_mod.DEFAULT
         self.root = root or ROOT
+        # Terminal display mode (Master, 2026-11-10): front
+        # end streams command output live; back end shows
+        # only the label and the result, with the full
+        # output still journaled. Remembered per profile.
+        self._term_mode = visor_prefs.get(
+            self.root, "term_mode", "front")
+        if self._term_mode not in ("front", "back"):
+            self._term_mode = "front"
+        # The profile's theme: the saved choice, or the
+        # default from themes.py (Kitsune Azure since
+        # Master's 2026-11-21 decision; Foxfire Ember
+        # remains a full choice).
+        _saved_theme = visor_prefs.get(
+            self.root, "theme", themes_mod.DEFAULT)
+        if _saved_theme not in themes_mod.THEMES:
+            _saved_theme = themes_mod.DEFAULT
+        self._apply_theme(_saved_theme)
         self.resume = resume
         self.reduced_motion = os.getenv("LEXIS_REDUCED_MOTION") == "1"
         self.busy = False
@@ -1019,6 +1108,7 @@ class LexisVisor(App):
 
     def _activity_running(self, label: str, target: str) -> None:
         self._activity_current = (label, target)
+        self._activity_verb = "running"
         self._activity_started_at = time.time()
         t = Text(no_wrap=True, overflow="ellipsis")
         t.append("◌ ", style=EMBER)
@@ -1035,10 +1125,11 @@ class LexisVisor(App):
             return
         label, target = cur
         secs = time.time() - started
+        verb = getattr(self, "_activity_verb", "running")
         t = Text(no_wrap=True, overflow="ellipsis")
         t.append("◌ ", style=EMBER)
         t.append(f"{label} · {target}", style=f"bold {TXT}")
-        t.append(f"   running · {secs:.0f}s", style=FAINT)
+        t.append(f"   {verb} · {secs:.0f}s", style=FAINT)
         self._activity(t)
 
     def _activity_waiting(self) -> None:
@@ -1052,7 +1143,16 @@ class LexisVisor(App):
     def _activity_done(self, ok: bool, detail: str,
                        duration: float) -> None:
         self._activity_started_at = None
+        # The finished line gets a short moment on the strip;
+        # if the turn is still going, the flame clock then
+        # hands the strip to a live continuation (see
+        # _activity_continue) instead of leaving a frozen
+        # tick behind (Master, 2026-11-11: after the terminal
+        # finished, no status animation continued, so it was
+        # impossible to tell done from hung).
+        self._activity_done_at = (time.time(), self._turn_started)
         label, target = self._activity_current or ("Tool", "")
+        self._activity_last_done = (label, target)
         t = Text(no_wrap=True, overflow="ellipsis")
         t.append("✓ " if ok else "✗ ", style=GREEN if ok else RED)
         t.append(f"{label} · {target}", style=f"bold {TXT}")
@@ -1061,6 +1161,20 @@ class LexisVisor(App):
             t.append(f" — {detail}", style=DIM)
         t.append(f" · {duration:.1f} s", style=FAINT)
         self._activity(t)
+
+    def _activity_continue(self) -> None:
+        """Hand the strip to the post-tool continuation: a
+        turn always goes back to the model after a tool, and
+        that wait stays visibly alive here, timed on the
+        turn's own clock like the status strip, until the
+        turn truly ends and _turn_finished settles the line
+        with a plain done."""
+        self._activity_done_at = None
+        self._activity_continuation = True
+        self._activity_current = ("Lexis", "working on the result")
+        self._activity_verb = "working"
+        self._activity_started_at = self._turn_started
+        self._activity_tick()
 
     def _post(self, widget) -> None:
         # Conversation text is selectable with the mouse:
@@ -1355,6 +1469,8 @@ class LexisVisor(App):
         self._turn_error = False
         self._streaming = False
         self._awaiting = False
+        self._activity_continuation = False
+        self._activity_done_at = None
         # A new turn cancels any dim and lights the flame with
         # an eased ramp from low ember.
         self._dimming = 0
@@ -1446,6 +1562,17 @@ class LexisVisor(App):
 
     def _turn_finished(self) -> None:
         self.busy = False
+        if getattr(self, "_activity_continuation", False):
+            # Settle the continuation on the turn's last tool,
+            # so the resting line still names the work that
+            # finished (the strip's long-standing contract),
+            # with a plain done for the turn as a whole.
+            self._activity_continuation = False
+            self._activity_current = getattr(
+                self, "_activity_last_done", None) or ("Lexis", "done")
+            self._activity_done(True, "done", max(
+                0.0, time.time() - (self._turn_started or time.time())))
+        self._activity_done_at = None
         self._conn = "error" if self._turn_error else "linked"
         self._streaming = False
         self._awaiting = False
@@ -1610,7 +1737,11 @@ class LexisVisor(App):
             self._pulse_phase = data.get("phase", "")
         if kind == "tool_output":
             text = str(data.get("text", ""))
-            if text:
+            # Back end display keeps the stream out of the
+            # panel; the strip still carries the label and
+            # the result, and the full output stays in the
+            # journal either way (presentation only).
+            if text and self._term_mode == "front":
                 self._stream_tool_line(text)
         if kind == "tool_start":
             self._tools_running = getattr(self, "_tools_running", 0) + 1
@@ -1665,6 +1796,13 @@ class LexisVisor(App):
                 self._post_note(f"⚠ Checked, with notes: {first}")
             else:
                 self._post_note(f"✗ Check failed: {first}")
+        elif kind == "conscience_refusal":
+            # EMBER's deliberation gate fired: Lexis itself
+            # refused, and the owner always hears the reason
+            # in plain language (blueprint rule).
+            self._post_note(
+                "Lexis refused this itself: "
+                + str(data.get("reason", "")))
         elif kind == "model_fallback":
             self._post_note(
                 f"The model {data.get('from')} did not answer "
@@ -1954,8 +2092,18 @@ class LexisVisor(App):
         w.update(t)
         if f % 5 == 0 and (self.busy or dimming):
             self._refresh_status()
-        if f % 5 == 0 and getattr(self, "_tools_running", 0):
-            self._activity_tick()
+        if f % 5 == 0 and self.busy and not dimming:
+            stamp = getattr(self, "_activity_done_at", None)
+            if (stamp is not None and stamp[1] is self._turn_started
+                    and time.time() - stamp[0] >= 1.2
+                    and not getattr(self, "_tools_running", 0)
+                    and not self._awaiting):
+                # The finished tool's line had its moment and
+                # the turn is still going: the strip must not
+                # freeze on the tick (Master, 2026-11-11).
+                self._activity_continue()
+            elif getattr(self, "_activity_started_at", None):
+                self._activity_tick()
         if (f % 5 == 0 and self.busy and not dimming
                 and not self._streaming
                 and not getattr(self, "_tools_running", 0)
@@ -2364,6 +2512,82 @@ class LexisVisor(App):
                     "Modes are EMBER, BLAZE, and INFERNO. "
                     "Use /mode to see the ladder."
                 )
+        elif cmd == "/term":
+            target = arg.lower()
+            if target in ("front", "back"):
+                self._set_term_mode(target)
+            elif not arg:
+                front_label = "Front end · output streams live"
+                back_label = "Back end · label and result only"
+
+                def term_done(choice):
+                    if not choice:
+                        return
+                    self._set_term_mode(
+                        "front" if choice == front_label
+                        else "back")
+
+                self.push_screen(
+                    PickScreen(
+                        "Terminal display",
+                        [front_label, back_label],
+                        front_label if self._term_mode == "front"
+                        else back_label,
+                    ),
+                    term_done,
+                )
+            else:
+                self._post_note(
+                    "Terminal display is front or back. "
+                    "Use /term to switch.")
+        elif cmd == "/theme":
+            target = arg.lower()
+            if target in ("foxfire", "ember",
+                          themes_mod.FOXFIRE):
+                self._set_theme(themes_mod.FOXFIRE)
+            elif target in ("azure", "kitsune",
+                            themes_mod.AZURE):
+                self._set_theme(themes_mod.AZURE)
+            elif not arg:
+                # The picker lists every registered theme
+                # (Master, 2026-11-21: /theme is an official
+                # command and must show its markers): the
+                # default theme carries a "default" marker in
+                # its label, and PickScreen itself marks the
+                # active one "(active)". Choosing applies at
+                # once and is remembered per profile through
+                # _set_theme.
+                def _theme_label(key):
+                    spec = themes_mod.THEMES[key]
+                    text = f"{spec['label']} · {spec['blurb']}"
+                    if key == themes_mod.DEFAULT:
+                        text += " · default"
+                    return text
+
+                labels = {
+                    key: _theme_label(key)
+                    for key in themes_mod.THEMES
+                }
+
+                def theme_done(choice):
+                    if not choice:
+                        return
+                    for key, label in labels.items():
+                        if choice == label:
+                            self._set_theme(key)
+
+                self.push_screen(
+                    PickScreen(
+                        "Theme",
+                        list(labels.values()),
+                        labels[self._theme_name],
+                    ),
+                    theme_done,
+                )
+            else:
+                self._post_note(
+                    "Themes are Foxfire Ember and Kitsune "
+                    "Azure. Use /theme to switch.")
         elif cmd == "/plan":
             if not arg:
                 if self.pulse.plan:
@@ -2518,6 +2742,56 @@ class LexisVisor(App):
         self.warden.set_mode(mode)
         self.ledger.append_event(self.session_id, "mode", mode)
         self._post_note(f"Compliance mode is now {mode}.")
+        self._refresh_all()
+
+    def _set_term_mode(self, mode: str) -> None:
+        """Terminal display mode (Master, 2026-11-10):
+        front end streams command output into the live
+        panel; back end shows only the tool's label and
+        result on the activity strip. Presentation only;
+        the full output is journaled in both modes."""
+        self._term_mode = mode
+        visor_prefs.set_pref(self.root, "term_mode", mode)
+        if mode == "front":
+            self._post_note(
+                "Terminal display: front end. Command output "
+                "streams live while it runs.")
+        else:
+            self._post_note(
+                "Terminal display: back end. Commands show "
+                "their label and result only; the full output "
+                "stays in the journal.")
+
+    def _apply_theme(self, name: str) -> None:
+        """Recolor the whole face from the one palette
+        table (themes.py): the Textual theme and its CSS
+        variables, the flames, the banner, the panels, the
+        emblems, the syntax style, and this module's own
+        accents. The artwork never changes, only colors."""
+        global EMBER, AMBER, DIM, FAINT, PALE, _syntax_active
+        spec = themes_mod.THEMES[name]
+        self._theme_name = name
+        self.theme = name
+        _syntax_active = name
+        EMBER = spec["ember"]
+        AMBER = spec["amber"]
+        DIM = spec["dim"]
+        FAINT = spec["faint"]
+        PALE = spec["pale"]
+        flames.set_palette(name)
+        banner_mod.set_colors(
+            spec["ember"], spec["amber"], spec["pale"],
+            spec["faint"], spec["dim"])
+        panels.set_colors(
+            spec["ember"], spec["amber"],
+            spec["foreground"], spec["dim"], spec["faint"])
+
+    def _set_theme(self, name: str) -> None:
+        self._apply_theme(name)
+        visor_prefs.set_pref(self.root, "theme", name)
+        spec = themes_mod.THEMES[name]
+        self._post_note(
+            f"Theme is now {spec['label']}, {spec['blurb']}.")
         self._refresh_all()
 
     def _show_cost(self) -> None:

@@ -33,6 +33,12 @@ TIER1 = [
     "security-awareness", "planning-and-task-breakdown",
 ]
 
+TIER2 = [
+    "api-and-interface-design", "ci-cd-and-automation",
+    "performance-optimization", "documentation-and-adrs",
+    "code-simplification", "frontend-ui-engineering",
+]
+
 
 def write_skill(root, slug, body, desc="A test skill."):
     folder = Path(root) / "skills" / slug
@@ -51,15 +57,15 @@ class RegistryTest(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_bundled_tier1_syncs_and_activates(self):
+    def test_bundled_library_syncs_and_activates(self):
         slugs = skills_mod.sync_bundled(self.root)
-        self.assertEqual(sorted(TIER1), sorted(slugs))
+        self.assertEqual(sorted(TIER1 + TIER2), sorted(slugs))
         reg = skills_mod.SkillRegistry(self.root)
         reg.activate_bundled(slugs)
         active = sorted(r["slug"] for r in reg.active())
-        self.assertEqual(sorted(TIER1), active)
+        self.assertEqual(sorted(TIER1 + TIER2), active)
         catalog = reg.catalog_text()
-        for slug in TIER1:
+        for slug in TIER1 + TIER2:
             self.assertIn(slug, catalog)
         body = reg.load_body("diagnosing-bugs")
         self.assertIn("Reproduce first", body)

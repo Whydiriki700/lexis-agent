@@ -16,6 +16,15 @@ PALE = "#ffd9a0"
 FAINT = "#6f5f4e"
 DIM = "#a08b74"
 
+
+def set_colors(ember, amber, pale, faint, dim) -> None:
+    """Theme switch (Master, 2026-11-10): the artwork and
+    the wordmark never change; only their colors follow
+    the active theme. The builders read these names at
+    call time."""
+    global EMBER, AMBER, PALE, FAINT, DIM
+    EMBER, AMBER, PALE, FAINT, DIM = ember, amber, pale, faint, dim
+
 MASCOT = [
     "        )",
     "       ) (",

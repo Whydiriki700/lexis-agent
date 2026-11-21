@@ -8,26 +8,33 @@ each emblem is one fused drawing."""
 
 from rich.text import Text
 
-from lexis.visor.banner import AMBER, EMBER, FAINT, PALE
+from lexis.visor import banner
 
-_BRAIN = [
-    ("   )  (   )", f"bold {EMBER}"),
-    ("  (    ) (", AMBER),
-    ("   (~~~~~)", PALE),
-    ("  (~(o)~~(~)", PALE),
-    ("  (~~(o)~)", PALE),
-    ("   (_____)", PALE),
-]
 
-_SKULL = [
-    ("   )  (   )", f"bold {EMBER}"),
-    ("  (    ) (", AMBER),
-    ('    .-"""-.', PALE),
-    ("   / (o)(o)\\", PALE),
-    ("   |   /\\   |", PALE),
-    ("    \\ |  | /", PALE),
-    ("     ‾‾‾‾‾", FAINT),
-]
+def _brain_lines():
+    # Built per call so the emblem follows the active
+    # theme's colors (Master, 2026-11-10); the drawing
+    # itself never changes.
+    return [
+        ("   )  (   )", f"bold {banner.EMBER}"),
+        ("  (    ) (", banner.AMBER),
+        ("   (~~~~~)", banner.PALE),
+        ("  (~(o)~~(~)", banner.PALE),
+        ("  (~~(o)~)", banner.PALE),
+        ("   (_____)", banner.PALE),
+    ]
+
+
+def _skull_lines():
+    return [
+        ("   )  (   )", f"bold {banner.EMBER}"),
+        ("  (    ) (", banner.AMBER),
+        ('    .-"""-.', banner.PALE),
+        ("   / (o)(o)\\", banner.PALE),
+        ("   |   /\\   |", banner.PALE),
+        ("    \\ |  | /", banner.PALE),
+        ("     ‾‾‾‾‾", banner.FAINT),
+    ]
 
 
 def _emblem(lines) -> Text:
@@ -41,9 +48,9 @@ def _emblem(lines) -> Text:
 
 def brain_fire_text() -> Text:
     """The burning brain: Lexis Cortex's own mark."""
-    return _emblem(_BRAIN)
+    return _emblem(_brain_lines())
 
 
 def skull_fire_text() -> Text:
     """The burning skull: INFERNO's own mark."""
-    return _emblem(_SKULL)
+    return _emblem(_skull_lines())

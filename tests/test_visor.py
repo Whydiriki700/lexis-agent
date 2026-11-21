@@ -34,14 +34,23 @@ def chat_text(app) -> str:
     return "\n".join(parts)
 
 
-async def wait_for(predicate, timeout=10.0):
-    waited = 0.0
-    while waited < timeout:
+async def wait_for(predicate, timeout=30.0):
+    # Production hardening (Master, 2026-11-21): the deadline is
+    # measured on a monotonic clock, not by counting nominal sleep
+    # lengths. The old counter lied under load: a sleep(0.1) that
+    # actually took a second still charged only 0.1 to the budget,
+    # so waits ended by iteration count instead of by time and the
+    # outcome depended on machine load. Assertions using this
+    # helper are unchanged; only the waiting is honest now.
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while True:
         if predicate():
             return True
+        if _time.monotonic() >= deadline:
+            return predicate()
         await asyncio.sleep(0.1)
-        waited += 0.1
-    return predicate()
 
 
 class DisplayTextTest(unittest.TestCase):
@@ -57,6 +66,19 @@ class DisplayTextTest(unittest.TestCase):
             display_text("keep [brackets] here"), "keep [brackets] here"
         )
 
+    def test_angle_dialect_never_reaches_the_user(self):
+        from lexis.visor.app import display_text
+
+        self.assertEqual(
+            display_text("mulai <LIST_DIR: workspace>\n</LIST_DIR>"),
+            "mulai \n")
+        self.assertEqual(
+            display_text("ok <WRITE_FILE: x.py>code </WRITE_FILE>"),
+            "ok ")
+        self.assertEqual(display_text("typing <LIST_DI"), "typing ")
+        self.assertEqual(
+            display_text("keep <tags> here"), "keep <tags> here")
+
 
 class VisorMountTest(unittest.IsolatedAsyncioTestCase):
     async def test_mounts_banner_panels_and_theme(self):
@@ -65,7 +87,7 @@ class VisorMountTest(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             svg = app.export_screenshot().replace("&#160;", " ")
             low = svg.lower()
-            self.assertIn("#ff7a29", low)  # Foxfire Ember present
+            self.assertIn("#38bdf8", low)  # Kitsune Azure, the default theme (Master, 2026-11-21)
             self.assertNotIn("#15b3da", low)  # Osvyn cyan forbidden
             self.assertIn("LEXIS", svg)
             self.assertIn("BY OSVYN", svg)
@@ -840,8 +862,21 @@ class BlazeVisorTest(unittest.IsolatedAsyncioTestCase):
                     app.push_screen = counting
 
                     async def _approve_first():
-                        for _ in range(60):
-                            await asyncio.sleep(0.5)
+                        # Production hardening (2026-11-21): the
+                        # old approver gave up after 60 fixed polls;
+                        # on a loaded machine the app could reach
+                        # the approval screen after the approver
+                        # had already left, and the turn then sat
+                        # on its approval event forever. Wait on a
+                        # real monotonic deadline instead, and step
+                        # aside if the turn somehow ended first so
+                        # the assertions below report the failure
+                        # instead of the test hanging.
+                        import time as _time
+
+                        deadline = _time.monotonic() + 120.0
+                        while _time.monotonic() < deadline:
+                            await asyncio.sleep(0.25)
                             if (app.screen.__class__.__name__
                                     == "ApprovalScreen"):
                                 from textual.widgets import Button
@@ -849,11 +884,14 @@ class BlazeVisorTest(unittest.IsolatedAsyncioTestCase):
                                 app.screen.query_one(
                                     "#approve", Button).press()
                                 return
+                            if not app.busy and pushes:
+                                return
 
                     asyncio.ensure_future(_approve_first())
                     app.submit_text("write both files")
                     self.assertTrue(
-                        await wait_for(lambda: not app.busy),
+                        await wait_for(
+                            lambda: not app.busy, timeout=120.0),
                         "turn did not finish",
                     )
                     self.assertEqual(["ApprovalScreen"], pushes)
@@ -1002,6 +1040,297 @@ class ApprovalLayoutTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotEqual(
                     "ApprovalScreen",
                     app.screen.__class__.__name__)
+
+
+class PostToolStatusTest(unittest.IsolatedAsyncioTestCase):
+    """Master's report (2026-11-11, screenshot): after a
+    terminal command finished, no status animation showed
+    whether Lexis was still working or done, so the app
+    looked hung. The gap between a tool ending and the
+    model's next reply must show a living thinking state."""
+
+    async def test_status_lives_after_tool_until_reply(self):
+        import time as _time
+
+        from textual.widgets import Static
+
+        from lexis.cortex import bridge as _bridge
+
+        calls = {"n": 0}
+        old_stream = _bridge.stream_chat
+        py = sys.executable
+
+        def stream(model, messages, key):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                yield f'[RUN: "{py}" -c "print(42)"]'
+                return
+            _time.sleep(6)
+            yield "Selesai. Hasilnya 42."
+
+        _bridge.stream_chat = stream
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(130, 48)) as pilot:
+                    await pilot.pause()
+                    app.warden.set_mode("INFERNO")
+                    app.submit_text("jalankan perintahnya")
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: calls["n"] == 2, timeout=60.0),
+                        "the second model call never started",
+                    )
+                    strip = app.query_one("#typing", Static)
+                    # Production hardening (2026-11-21): the old
+                    # code sampled the strip once, immediately;
+                    # under load that sample could land before the
+                    # phase event updated the strip and the test
+                    # failed on a healthy app. Wait until the
+                    # thinking state is actually on the strip,
+                    # then prove it keeps animating by waiting
+                    # for the render to change. Same claims,
+                    # condition-based instead of luck-based.
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: "thinking"
+                            in str(strip.render()).lower(),
+                            timeout=30.0),
+                        "no thinking state after the tool",
+                    )
+                    first = str(strip.render())
+                    self.assertNotIn(
+                        "idle", app._work_state()[1].lower())
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: str(strip.render()) != first,
+                            timeout=10.0),
+                        "the status did not animate during "
+                        "the post-tool wait")
+                    # The activity strip (the line tied to
+                    # the terminal work itself) must hand over
+                    # to a live continuation, not freeze on
+                    # the finished tick (Master's report).
+                    act = app.query_one("#activity", Static)
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: "working on the result"
+                            in str(act.render()),
+                            timeout=30.0),
+                        "the activity strip froze on the "
+                        "finished line after the tool",
+                    )
+                    first_act = str(act.render())
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: str(act.render())
+                            != first_act,
+                            timeout=15.0),
+                        "the continuation did not keep "
+                        "counting",
+                    )
+                    self.assertTrue(
+                        await wait_for(
+                            lambda: not app.busy
+                            and "Hasilnya 42" in chat_text(app),
+                            timeout=60.0),
+                        "the turn never finished",
+                    )
+                    self.assertIn(
+                        "done", str(act.render()),
+                        "the end of the turn is not marked "
+                        "on the activity strip")
+        finally:
+            _bridge.stream_chat = old_stream
+
+
+class PrefsTest(unittest.TestCase):
+    def test_roundtrip_and_tolerance(self):
+        from lexis.visor import prefs
+
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(
+                prefs.get(d, "term_mode", "front"), "front")
+            prefs.set_pref(d, "term_mode", "back")
+            self.assertEqual(
+                prefs.get(d, "term_mode", "front"), "back")
+            prefs.set_pref(d, "theme", "kitsune-blue")
+            self.assertEqual(
+                prefs.get(d, "term_mode", "front"), "back")
+            with open(os.path.join(d, "visor_prefs.json"),
+                      "w", encoding="utf-8") as f:
+                f.write("{not json")
+            self.assertEqual(
+                prefs.get(d, "term_mode", "front"), "front")
+
+
+class TermDisplayTest(unittest.IsolatedAsyncioTestCase):
+    """Terminal display modes (Master, 2026-11-10): front
+    end streams command output into the live panel; back
+    end never feeds the stream, while the command itself
+    still runs and its result still reaches the model."""
+
+    async def _run_mode(self, pref):
+        from lexis.cortex import bridge as _bridge
+
+        calls = {"n": 0}
+        old_stream = _bridge.stream_chat
+        py = sys.executable
+
+        def stream(model, messages, key):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                yield f'[RUN: "{py}" -c "print(7)"]'
+                return
+            yield "beres"
+
+        _bridge.stream_chat = stream
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                if pref is not None:
+                    from lexis.visor import prefs
+
+                    prefs.set_pref(d, "term_mode", pref)
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(130, 48)) as pilot:
+                    await pilot.pause()
+                    app.warden.set_mode("INFERNO")
+                    seen = {"lines": 0}
+                    orig_line = app._stream_tool_line
+
+                    def spy(text):
+                        seen["lines"] += 1
+                        return orig_line(text)
+
+                    app._stream_tool_line = spy
+                    app.submit_text("jalankan")
+                    self.assertTrue(
+                        await wait_for(lambda: not app.busy),
+                        "the turn never finished",
+                    )
+                    self.assertEqual(
+                        calls["n"], 2,
+                        "the command did not execute",
+                    )
+                    self.assertIn("beres", chat_text(app))
+                    return seen["lines"]
+        finally:
+            _bridge.stream_chat = old_stream
+
+    async def test_back_end_hides_the_stream(self):
+        self.assertEqual(await self._run_mode("back"), 0)
+
+    async def test_front_end_streams(self):
+        self.assertGreaterEqual(await self._run_mode(None), 1)
+
+
+class ThemeSwitchTest(unittest.IsolatedAsyncioTestCase):
+    """The second theme (Master, 2026-11-10): Kitsune
+    Azure is a full face switch, remembered per profile.
+    Since Master's 2026-11-21 decision Azure is the
+    default; Foxfire Ember is unchanged, remains a full
+    choice, and restores exactly."""
+
+    async def test_default_is_azure(self):
+        with tempfile.TemporaryDirectory() as d:
+            app = LexisVisor(root=d)
+            async with app.run_test(size=(130, 48)) as pilot:
+                await pilot.pause()
+                self.assertEqual(app.theme, "kitsune-azure")
+                self.assertEqual(
+                    app._theme_name, "kitsune-azure")
+
+    async def test_switch_persists_and_recolors(self):
+        from lexis.visor import flames, prefs
+
+        with tempfile.TemporaryDirectory() as d:
+            app = LexisVisor(root=d)
+            async with app.run_test(size=(130, 48)) as pilot:
+                await pilot.pause()
+                bg_before = str(app.screen.styles.background)
+                app._set_theme("foxfire-ember")
+                await pilot.pause()
+                try:
+                    self.assertEqual(app.theme, "foxfire-ember")
+                    self.assertEqual(
+                        prefs.get(d, "theme", ""),
+                        "foxfire-ember")
+                    self.assertEqual(flames.EMBER, "#FF7A29")
+                    self.assertNotEqual(
+                        str(app.screen.styles.background),
+                        bg_before)
+                finally:
+                    app._set_theme("kitsune-azure")
+                    await pilot.pause()
+                self.assertEqual(flames.EMBER, "#38BDF8")
+                self.assertEqual(
+                    str(app.screen.styles.background),
+                    bg_before)
+
+
+class ThemeCommandTest(unittest.IsolatedAsyncioTestCase):
+    """/theme as an official slash command (Master,
+    2026-11-21): the bare command opens a picker listing
+    every registered theme with the active and default
+    markers visible; choosing applies at once and is
+    remembered per profile; the direct argument form
+    applies without the picker."""
+
+    async def test_picker_lists_markers_and_choice_applies(self):
+        from textual.widgets import OptionList
+
+        from lexis.visor import prefs
+
+        with tempfile.TemporaryDirectory() as d:
+            app = LexisVisor(root=d)
+            async with app.run_test(size=(130, 48)) as pilot:
+                await pilot.pause()
+                app.submit_text("/theme")
+                self.assertTrue(
+                    await wait_for(
+                        lambda: app.screen.__class__.__name__
+                        == "PickScreen"
+                        and len(app.screen.query(OptionList))
+                        > 0),
+                    "/theme never opened the picker",
+                )
+                ol = app.screen.query_one(OptionList)
+                prompts = [
+                    str(ol.get_option_at_index(i).prompt)
+                    for i in range(ol.option_count)
+                ]
+                self.assertEqual(2, len(prompts))
+                joined = "\n".join(prompts)
+                self.assertIn("Foxfire Ember", joined)
+                self.assertIn("Kitsune Azure", joined)
+                self.assertIn("default", joined)
+                self.assertIn("(active)", joined)
+                azure_row = next(
+                    p for p in prompts if "Kitsune" in p)
+                self.assertIn("default", azure_row)
+                self.assertIn("(active)", azure_row)
+                fox_idx = next(
+                    i for i, p in enumerate(prompts)
+                    if "Foxfire" in p)
+                ol.highlighted = fox_idx
+                await pilot.press("enter")
+                self.assertTrue(
+                    await wait_for(
+                        lambda: app._theme_name
+                        == "foxfire-ember"),
+                    "the picker choice never applied",
+                )
+                self.assertEqual(
+                    prefs.get(d, "theme", ""), "foxfire-ember")
+                app.submit_text("/theme azure")
+                self.assertTrue(
+                    await wait_for(
+                        lambda: app._theme_name
+                        == "kitsune-azure"),
+                    "/theme azure never applied",
+                )
+                self.assertEqual(
+                    prefs.get(d, "theme", ""), "kitsune-azure")
 
 
 class VisorEvolveTest(unittest.IsolatedAsyncioTestCase):

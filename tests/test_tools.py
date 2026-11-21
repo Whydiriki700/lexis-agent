@@ -185,6 +185,22 @@ class MarkerParseTest(unittest.TestCase):
         self.assertEqual("echo a[0] && echo done",
                          forge_mod.find_line_marker(text, "RUN"))
 
+    def test_angle_dialect_markers(self):
+        # Models sometimes XML-ify the protocol; the dialect
+        # executes as a fallback (Master's session,
+        # 2026-11-11: <LIST_DIR: workspace>).
+        self.assertEqual(
+            "echo hi",
+            forge_mod.find_line_marker("<RUN: echo hi>\nnext", "RUN"))
+        self.assertEqual(
+            "workspace",
+            forge_mod.find_bracket_marker(
+                "<LIST_DIR: workspace>", "LIST_DIR"))
+        text = ("sure\n<EDIT_FILE: /tmp/a.py> x = 1 <WITH> x = 2 "
+                "</EDIT_FILE>")
+        self.assertEqual(("/tmp/a.py", "x = 1", "x = 2"),
+                         forge_mod.find_edit_marker(text))
+
 
 class PulseToolsTest(unittest.TestCase):
     def setUp(self):

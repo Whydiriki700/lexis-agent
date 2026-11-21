@@ -122,6 +122,16 @@ class TestForgeWarden(unittest.TestCase):
             ("b.txt", "halo"),
         )
         self.assertIsNone(fm.find_read_marker("tidak ada"))
+        # The angle dialect is understood as a fallback
+        # (Master's session, 2026-11-11).
+        self.assertEqual(
+            fm.find_read_marker("x <READ_FILE: C:/a.txt> y"), "C:/a.txt"
+        )
+        self.assertEqual(
+            fm.find_write_marker(
+                "t <WRITE_FILE: b.txt> halo </WRITE_FILE>"),
+            ("b.txt", "halo"),
+        )
 
     def test_warden(self):
         from lexis.cortex.warden import ALLOW, ASK, WARN, Warden

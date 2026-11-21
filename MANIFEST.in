@@ -1,0 +1,5 @@
+include LICENSE NOTICE
+include lexis/visor/theme.tcss
+graft lexis/skill_library
+global-exclude *.pyc
+global-exclude __pycache__

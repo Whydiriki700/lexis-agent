@@ -24,6 +24,7 @@ import re
 import time
 
 from . import bridge
+from . import conscience as conscience_mod
 from . import forge as forge_mod
 from . import judge as judge_mod
 from . import prism
@@ -188,12 +189,46 @@ class Pulse:
             "duration": duration, "outcome": outcome,
         })
 
+    def _refuse(self, name: str, primary: str,
+                reason: str) -> None:
+        """Conscience refusal (EMBER's deliberation gate):
+        the action never runs, the owner sees the reason on
+        the surface, the model is told why, and the refusal
+        is journaled like every other decision."""
+        self._event("conscience_refusal", {
+            "name": name, "path": primary, "reason": reason,
+        })
+        self._event("tool_end", {
+            "name": name, "path": primary, "ok": False,
+            "detail": "refused by Lexis itself",
+            "duration": 0.0,
+        })
+        self._turn_tools.append({
+            "name": name, "ok": False, "path": primary,
+            "detail": "refused by Lexis itself",
+        })
+        self.ledger.append_event(
+            self.session_id, "conscience", reason)
+        feedback = (f"[HASIL {name} {primary}: DITOLAK OLEH "
+                    f"LEXIS SENDIRI: {reason}]")
+        self.vault.add("user", feedback)
+        self.ledger.append_message(
+            self.session_id, "user", feedback)
+        self.emit_line(
+            f"  [SISTEM: Lexis menolak: {reason}]\n")
+
     def _do_write(self, path: str, content: str) -> str:
         """Execute one write marker through the warden and, in ASK
         modes, the owner. Returns 'written', or 'stopped' when the
         write was held, declined, or failed (the turn then ends,
         as the original ended it after a write decision)."""
         path = self._abs(path)
+        refusal = conscience_mod.deliberate(
+            "write_file", path, self.warden.mode, self.root,
+            self.workdir)
+        if refusal is not None:
+            self._refuse("write_file", path, refusal)
+            return "stopped"
         risk = self.forge.risk_of("write_file")
         decision = self.warden.decide(risk)
         try:
@@ -406,6 +441,14 @@ class Pulse:
 
         name = spec["name"]
         primary = spec["primary"]
+        refusal = conscience_mod.deliberate(
+            name, primary, self.warden.mode, self.root,
+            self.workdir)
+        if refusal is not None:
+            self._refuse(name, primary, refusal)
+            self._finish("tool_done", started, model_used,
+                         prompt_tokens, full)
+            return "tool_done"
         if spec["risk"] in ("write", "exec"):
             self.emit_line(
                 f"  [IZIN: Lexis ingin menjalankan {name} '{primary}']"

@@ -18,6 +18,14 @@ TXT = "#e8ded2"
 DIM = "#a08b74"
 FAINT = "#6f5f4e"
 
+
+def set_colors(ember, amber, txt, dim, faint) -> None:
+    """Theme switch (Master, 2026-11-10): panel accents
+    follow the active theme; the builders read these
+    names at call time."""
+    global EMBER, AMBER, TXT, DIM, FAINT
+    EMBER, AMBER, TXT, DIM, FAINT = ember, amber, txt, dim, faint
+
 CONTEXT_WINDOW = 128_000  # nominal window the percentage refers to
 COMPACTION_AT = 82  # locked trigger ratio from the research
 

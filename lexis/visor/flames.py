@@ -14,7 +14,6 @@ Reduced motion renders one static frame: the language is
 present, the movement is not.
 """
 
-import functools
 import math
 
 from rich.text import Text
@@ -36,6 +35,51 @@ _STOPS = (
     (1.0, (255, 217, 160)),
 )
 
+# Theme palettes (Master, 2026-11-10: the second theme,
+# a blue kitsune fire stronger than the first). Foxfire is
+# the locked original above. Azure answers with seven
+# stops instead of five and a white-hot core: more ladder
+# to lerp across, so its motion reads richer at the same
+# clock. set_palette rebinds the module colors; every
+# renderer reads them at call time.
+_PALETTES = {
+    "foxfire-ember": {
+        "stops": _STOPS,
+        "PALE": PALE, "AMBER": AMBER, "HOT": HOT,
+        "EMBER": EMBER, "DEEP": DEEP, "COOL": COOL,
+        "ASH": ASH,
+    },
+    "kitsune-azure": {
+        "stops": (
+            (0.0, (30, 64, 175)),
+            (0.2, (29, 78, 216)),
+            (0.4, (37, 99, 235)),
+            (0.58, (56, 150, 248)),
+            (0.72, (56, 189, 248)),
+            (0.86, (147, 197, 253)),
+            (1.0, (240, 249, 255)),
+        ),
+        "PALE": "#E0F2FE", "AMBER": "#7DD3FC",
+        "HOT": "#BAE6FD", "EMBER": "#38BDF8",
+        "DEEP": "#2563EB", "COOL": "#1E40AF",
+        "ASH": "#33507A",
+    },
+}
+
+
+def set_palette(name: str) -> None:
+    pal = _PALETTES.get(name)
+    if pal is None:
+        return
+    g = globals()
+    g["_STOPS"] = pal["stops"]
+    for key in ("PALE", "AMBER", "HOT", "EMBER", "DEEP",
+                "COOL", "ASH"):
+        g[key] = pal[key]
+    cache = g.get("_glow_cache")
+    if cache is not None:
+        cache.clear()
+
 
 def _noise(n: int) -> float:
     """Deterministic 0..1 noise from an integer (xorshift)."""
@@ -46,28 +90,14 @@ def _noise(n: int) -> float:
     return (x & 0xFFFF) / 65535.0
 
 
-@functools.lru_cache(maxsize=4096)
-def _smooth_cached(key: float) -> float:
-    """Cached smooth value noise: identical inputs hit the cache.
-
-    The key is the raw float quantized to 1e-6 so repeated frames
-    reuse the exact same lattice math instead of recomputing it.
-    """
-    x = key
+def _smooth(x: float) -> float:
+    """Smooth value noise: lattice hashes lerped with a
+    smootherstep curve, so consecutive samples move gradually."""
     i = int(math.floor(x))
     f = x - i
     u = f * f * f * (f * (f * 6 - 15) + 10)
     a, b = _noise(i), _noise(i + 1)
     return a + (b - a) * u
-
-
-def _smooth(x: float) -> float:
-    """Smooth value noise: lattice hashes lerped with a
-    smootherstep curve, so consecutive samples move gradually.
-
-    Hot path: quantized cache keeps the 90 ms clock cheap.
-    """
-    return _smooth_cached(round(x, 6))
 
 
 def _lerp_color(t: float) -> str:
@@ -178,21 +208,9 @@ def typing_text(frame: int, label: str = "Lexis is typing",
 
 def glow_color(frame: int) -> str:
     """The warm status glow: a smooth pulse through the ember
-    palette, lerped, never snapped between stops.
-
-    Cached per frame modulo 256: the pulse repeats, so the
-    status strip reuses colors instead of recomputing lerps.
-    """
-    key = frame % _GLOW_CACHE_SIZE
-    hit = _glow_cache.get(key)
-    if hit is not None:
-        return hit
+    palette, lerped, never snapped between stops."""
     t = _smooth(frame * 0.06) * 0.6 + _smooth(frame * 0.017) * 0.4
-    color = _lerp_color(0.2 + 0.8 * t)
-    if len(_glow_cache) >= _GLOW_CACHE_SIZE:
-        _glow_cache.clear()
-    _glow_cache[key] = color
-    return color
+    return _lerp_color(0.2 + 0.8 * t)
 
 
 # One-cell status flame (Master, 2026-11-11): the ember lives
@@ -200,8 +218,6 @@ def glow_color(frame: int) -> str:
 # breathing low at idle. It is never absent: a user must be
 # able to see at a glance that the fire is lit, and whether
 # it is working or resting.
-_GLOW_CACHE_SIZE = 256
-_glow_cache: dict = {}
 _BUSY_FRAMES = ("▂", "▃", "▅", "▇", "▅", "▃")
 _IDLE_FRAMES = ("▁", "▁", "▂", "▁")
 

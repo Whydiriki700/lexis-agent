@@ -1,19 +1,13 @@
-/* Lexis Visor theme: Foxfire Ember.
-   Foxfire orange #ff7a29 + amber #e0a83c on warm charcoal black.
-   Blue and Osvyn cyan are never used for Lexis. */
-
-$ember: #ff7a29;
-$amber: #e0a83c;
-$bg: #0c0a08;
-$pnl: #171310;
-$pnl2: #100d0a;
-$line: #2b2118;
-$line2: #3d2d1d;
-$txt: #e8ded2;
-$dim: #a08b74;
-$faint: #6f5f4e;
-$green: #3fb96f;
-$red: #e05c5c;
+/* Lexis Visor themes. Every color variable used below
+   comes from the registered themes in themes.py: Foxfire
+   Ember (locked 2026-11-10: foxfire orange #ff7a29 +
+   amber #e0a83c on warm charcoal black) is the default,
+   Kitsune Azure (Master, 2026-11-10) is the second theme.
+   The variables are deliberately NOT defined in this
+   stylesheet: a stylesheet-local definition shadows the
+   active theme's variables (proven by ThemeSwitchTest on
+   the PC, 2026-11-13), which would freeze the face on
+   one palette. The stylesheet itself never changes. */
 
 Screen {
     background: $bg;

@@ -99,6 +99,21 @@ class PhaseTest(unittest.TestCase):
 
 
 class GlowTest(unittest.TestCase):
+    """The glow assertions below describe the Foxfire
+    palette specifically, so this test pins that palette
+    itself instead of trusting ambient module state: the
+    palette is module-global, and since Kitsune Azure
+    became the default theme (Master, 2026-11-21) a Visor
+    test running earlier in the same process legitimately
+    leaves Azure bound. tearDown rebinds the product
+    default so later tests see a fresh app's state."""
+
+    def setUp(self):
+        flames.set_palette("foxfire-ember")
+
+    def tearDown(self):
+        flames.set_palette("kitsune-azure")
+
     def test_glow_pulses_in_palette(self):
         colors = {flames.glow_color(f) for f in range(20)}
         self.assertGreater(len(colors), 3)
@@ -126,6 +141,36 @@ class StatusFlameTest(unittest.TestCase):
         frames = {flames.status_flame(f, True, reduced=True)
                   for f in range(12)}
         self.assertEqual(len(frames), 1)
+
+
+class PaletteSwitchTest(unittest.TestCase):
+    """The second theme's flame palette (Master,
+    2026-11-10): azure recolors every flame surface, and
+    switching back restores the locked foxfire values
+    exactly."""
+
+    def tearDown(self):
+        flames.set_palette("foxfire-ember")
+
+    def test_azure_recolors_and_foxfire_restores(self):
+        base = flames._lerp_color(0.5)
+        base_glow = flames.glow_color(10)
+        flames.set_palette("kitsune-azure")
+        self.assertNotEqual(flames._lerp_color(0.5), base)
+        self.assertNotEqual(flames.glow_color(10), base_glow)
+        self.assertEqual(flames.EMBER, "#38BDF8")
+        azure_rows = flames.flame_rows(3, width=20)
+        self.assertTrue(azure_rows)
+        flames.set_palette("foxfire-ember")
+        self.assertEqual(flames._lerp_color(0.5), base)
+        self.assertEqual(flames.glow_color(10), base_glow)
+        self.assertEqual(flames.EMBER, "#FF7A29")
+
+    def test_azure_has_the_wider_ladder(self):
+        stops = flames._PALETTES["kitsune-azure"]["stops"]
+        fox = flames._PALETTES["foxfire-ember"]["stops"]
+        self.assertGreater(len(stops), len(fox))
+        self.assertEqual(stops[-1][1], (240, 249, 255))
 
 
 if __name__ == "__main__":

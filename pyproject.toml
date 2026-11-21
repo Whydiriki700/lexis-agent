@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "lexis-agent"
 version = "0.1.0"
 description = "Lexis Agent: AI agent CLI by Osvyn, powered by the Lexis Cortex."
+readme = "README.md"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Riki Wahyudi (Osvyn)" }]
 requires-python = ">=3.10"

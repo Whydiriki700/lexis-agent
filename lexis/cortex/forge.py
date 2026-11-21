@@ -408,6 +408,20 @@ class Forge:
         return self.call(name, **kwargs)
 
 
+def _angle_arg(text: str, tag: str):
+    """The argument of an angle-bracket <TAG: argument> marker,
+    or None. Models sometimes XML-ify the protocol (Master's
+    session, 2026-11-11: a <LIST_DIR: workspace> attempt);
+    the dialect is understood as a fallback, never required,
+    and the square form always wins when both appear."""
+    marker = f"<{tag}:"
+    if marker in text and ">" in text:
+        start = text.find(marker) + len(marker)
+        end = text.find(">", start)
+        return text[start:end].strip()
+    return None
+
+
 def find_read_marker(text: str):
     """Return the path from a [READ_FILE: path] marker, or None.
     Mirrors the original main.py parsing exactly."""
@@ -415,21 +429,35 @@ def find_read_marker(text: str):
         start = text.find(READ_MARKER) + len(READ_MARKER)
         end = text.find("]", start)
         return text[start:end].strip()
-    return None
+    return _angle_arg(text, "READ_FILE")
 
 
 def find_write_marker(text: str):
     """Return (path, content) from a [WRITE_FILE: path] ... [/WRITE_FILE]
-    marker, or None. Mirrors the original main.py parsing exactly."""
-    if WRITE_MARKER in text and WRITE_END in text:
-        start = text.find(WRITE_MARKER) + len(WRITE_MARKER)
-        end = text.find("]", start)
+    marker, or None. Mirrors the original main.py parsing exactly.
+    The angle dialect (<WRITE_FILE: path> ... </WRITE_FILE>) is
+    accepted wherever it appears first."""
+    sq = text.find(WRITE_MARKER) if WRITE_END in text else -1
+    ag = text.find("<WRITE_FILE:") if "</WRITE_FILE>" in text else -1
+    if sq == -1 and ag == -1:
+        return None
+    if ag != -1 and (sq == -1 or ag < sq):
+        start = ag + len("<WRITE_FILE:")
+        end = text.find(">", start)
+        if end == -1:
+            return None
         filename = text[start:end].strip()
-        content_start = text.find("]", start) + 1
-        content_end = text.find(WRITE_END)
-        content = text[content_start:content_end].strip()
-        return filename, content
-    return None
+        content_end = text.find("</WRITE_FILE>", end)
+        if content_end == -1:
+            return None
+        return filename, text[end + 1:content_end].strip()
+    start = text.find(WRITE_MARKER) + len(WRITE_MARKER)
+    end = text.find("]", start)
+    filename = text[start:end].strip()
+    content_start = text.find("]", start) + 1
+    content_end = text.find(WRITE_END)
+    content = text[content_start:content_end].strip()
+    return filename, content
 
 
 def find_write_markers(text: str):
@@ -445,8 +473,14 @@ def find_write_markers(text: str):
         if one is None:
             return out
         out.append(one)
-        end = rest.find(WRITE_END)
-        rest = rest[end + len(WRITE_END):]
+        ends = [rest.find(WRITE_END), rest.find("</WRITE_FILE>")]
+        ends = [e for e in ends if e != -1]
+        if not ends:
+            return out
+        end = min(ends)
+        token = (WRITE_END if rest.startswith(WRITE_END, end)
+                 else "</WRITE_FILE>")
+        rest = rest[end + len(token):]
 
 
 def find_edit_marker(text: str):
@@ -464,6 +498,27 @@ def find_edit_marker(text: str):
         old = text[end + 1:with_at].strip()
         new = text[with_at + len(EDIT_WITH):end_at].strip()
         return filename, old, new
+    if EDIT_MARKER not in text:
+        # Angle dialect: <EDIT_FILE: path> old <WITH> new
+        # </EDIT_FILE> (the [WITH] separator is accepted too).
+        a_marker, a_end = "<EDIT_FILE:", "</EDIT_FILE>"
+        if a_marker in text and a_end in text:
+            start = text.find(a_marker) + len(a_marker)
+            end = text.find(">", start)
+            if end == -1:
+                return None
+            filename = text[start:end].strip()
+            with_at, with_len = -1, 0
+            for w in ("<WITH>", EDIT_WITH):
+                at = text.find(w, end)
+                if at != -1 and (with_at == -1 or at < with_at):
+                    with_at, with_len = at, len(w)
+            end_at = text.find(a_end, end)
+            if with_at == -1 or end_at == -1 or with_at > end_at:
+                return None
+            old = text[end + 1:with_at].strip()
+            new = text[with_at + with_len:end_at].strip()
+            return filename, old, new
     return None
 
 
@@ -475,7 +530,7 @@ def find_bracket_marker(text: str, tag: str):
         start = text.find(marker) + len(marker)
         end = text.find("]", start)
         return text[start:end].strip()
-    return None
+    return _angle_arg(text, tag)
 
 
 def find_line_marker(text: str, tag: str):
@@ -489,6 +544,15 @@ def find_line_marker(text: str, tag: str):
         line = text[start:] if end == -1 else text[start:end]
         line = line.strip()
         if line.endswith("]"):
+            line = line[:-1].strip()
+        return line
+    marker = f"<{tag}:"
+    if marker in text:
+        start = text.find(marker) + len(marker)
+        end = text.find("\n", start)
+        line = text[start:] if end == -1 else text[start:end]
+        line = line.strip()
+        if line.endswith(">"):
             line = line[:-1].strip()
         return line
     return None
