@@ -66,6 +66,31 @@ class DisplayTextTest(unittest.TestCase):
             display_text("keep [brackets] here"), "keep [brackets] here"
         )
 
+    def test_markdown_emphasis_never_reaches_the_user(self):
+        from lexis.visor.app import display_text
+
+        self.assertEqual(
+            display_text("**Audit kode** — scan dulu"),
+            "Audit kode — scan dulu")
+        self.assertEqual(
+            display_text("- **Uji target** — kasih host"),
+            "- Uji target — kasih host")
+        self.assertEqual(
+            display_text("pakai *mode* ini"), "pakai mode ini")
+        self.assertEqual(
+            display_text("jalan `lexis doctor` dulu"),
+            "jalan lexis doctor dulu")
+        self.assertEqual(
+            display_text("## Hasil\nisi"), "Hasil\nisi")
+        # Not emphasis: arithmetic and dunder names survive.
+        self.assertEqual(display_text("2 * 3 * 4"), "2 * 3 * 4")
+        self.assertEqual(
+            display_text("panggil __init__ sekarang"),
+            "panggil __init__ sekarang")
+        # An unpaired marker mid-stream waits for its pair.
+        self.assertEqual(
+            display_text("typing **Aud"), "typing **Aud")
+
     def test_angle_dialect_never_reaches_the_user(self):
         from lexis.visor.app import display_text
 
@@ -316,6 +341,40 @@ class MasterFixBatchTest(unittest.IsolatedAsyncioTestCase):
                     encoding="utf-8"
                 ),
             )
+
+    async def test_provider_billing_refusal_says_so(self):
+        # Master's Gonka, 2026-11-21: the model endpoint
+        # answered 402 and the note could only say "could not
+        # read", which reads like a Lexis bug. The note must
+        # name the real cause.
+        class Resp402:
+            status_code = 402
+
+            def json(self):
+                return {"error": {"message": "insufficient balance"}}
+
+        class FakeRequests:
+            def get(self, url, headers=None, timeout=None):
+                return Resp402()
+
+        old_requests = bridge.requests
+        bridge.requests = FakeRequests()
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                Path(os.path.join(d, ".env")).write_text(
+                    "DEEPSEEK_API_KEY=<redacted>\n", encoding="utf-8")
+                bridge.add_provider(
+                    d, "BrokeProv", "https://api.example.com/v1",
+                    "fixture-key-broke")
+                app = LexisVisor(root=d)
+                async with app.run_test(size=(150, 48)) as pilot:
+                    await pilot.pause()
+                    app.submit_text("/provider BrokeProv")
+                    self.assertTrue(await wait_for(
+                        lambda: "needs credit (402)" in chat_text(app)
+                    ))
+        finally:
+            bridge.requests = old_requests
 
     async def test_icons_own_emblems(self):
         from lexis.visor.app import BootScreen, InfernoScreen

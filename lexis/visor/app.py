@@ -280,6 +280,20 @@ _ANGLE_HEADS = (
     tuple(f"<{t}:" for t in _TAGS)
     + tuple(f"</{t}>" for t in _TAGS)
 )
+# Markdown emphasis (Master's session, 2026-11-21: the model's
+# **bold** reached the screen as raw asterisks). The chat renders
+# plain Text, so emphasis markers are stripped and the words
+# stay. Only paired markers are touched: an unpaired marker may
+# still be completed by the next stream chunk, arithmetic with
+# spaces around the asterisks is not emphasis, and a __dunder__
+# name is code, not bold (underscore bold needs a space inside).
+_MD_BOLD_RE = re.compile(r"\*\*(.+?)\*\*", re.S)
+_MD_BOLD_U_RE = re.compile(r"__([^_]*\s[^_]*?)__")
+_MD_STRIKE_RE = re.compile(r"~~(.+?)~~", re.S)
+_MD_CODE_RE = re.compile(r"`([^`\n]+?)`")
+_MD_ITALIC_RE = re.compile(r"\*([^*\s][^*\n]*?[^*\s]|[^*\s])\*")
+_MD_HEADING_RE = re.compile(r"(?m)^#{1,6}[ \t]+")
+_MD_QUOTE_RE = re.compile(r"(?m)^>[ \t]?")
 
 
 def display_text(buf: str) -> str:
@@ -316,6 +330,13 @@ def display_text(buf: str) -> str:
             for head in _ANGLE_HEADS
         ):
             buf = buf[:i]
+    buf = _MD_BOLD_RE.sub(r"\1", buf)
+    buf = _MD_BOLD_U_RE.sub(r"\1", buf)
+    buf = _MD_STRIKE_RE.sub(r"\1", buf)
+    buf = _MD_CODE_RE.sub(r"\1", buf)
+    buf = _MD_ITALIC_RE.sub(r"\1", buf)
+    buf = _MD_HEADING_RE.sub("", buf)
+    buf = _MD_QUOTE_RE.sub("", buf)
     return buf
 
 
@@ -2277,6 +2298,20 @@ class LexisVisor(App):
                 "request, no restart needed."
             )
         if self.compass.catalog_source == "provider-failed":
+            err = getattr(self.compass, "catalog_error", None)
+            if err == "billing":
+                return (
+                    f"{name} refused its model list: the account "
+                    "needs credit (402). The switch applies, but "
+                    "requests will fail until the account is "
+                    "funded. Keeping the current catalog."
+                )
+            if err == "auth":
+                return (
+                    f"{name} rejected the saved key (401). Check "
+                    "this provider's key, then switch again. "
+                    "Keeping the current catalog."
+                )
             return (
                 f"Could not read a model list from {name}; "
                 "keeping the current catalog. Applies from the "

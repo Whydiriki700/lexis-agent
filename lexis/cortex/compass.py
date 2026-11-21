@@ -84,6 +84,7 @@ class Compass:
         self.probe = load_probe(root)
         self.models = list(MODELS)
         self.catalog_source = "builtin"
+        self.catalog_error = None
         self.refresh_models()
 
     def refresh_models(self) -> int:
@@ -103,21 +104,25 @@ class Compass:
             ids = bridge.fetch_models(self.root)
             legacy = bool(
                 bridge.active_provider(self.root).get("legacy"))
+            fetch_error = getattr(bridge, "last_fetch_error", None)
         except Exception:
-            ids, legacy = None, True
+            ids, legacy, fetch_error = None, True, None
         if ids:
             chat = [m for m in ids if is_chat_model(m)]
             self.models = chat or list(ids)
             self.catalog_source = "provider"
+            self.catalog_error = None
             if self.current not in self.models:
                 self.current = self.models[0]
         elif legacy:
             self.models = list(MODELS)
             self.catalog_source = "builtin"
+            self.catalog_error = None
             if self.current not in self.models:
                 self.current = DEFAULT_MODEL
         else:
             self.catalog_source = "provider-failed"
+            self.catalog_error = fetch_error
         return len(self.models)
 
     def list_models(self):

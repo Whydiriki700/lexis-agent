@@ -182,12 +182,28 @@ def base_url(root: str = None) -> str:
     return os.getenv(BASE_ENV, DEFAULT_BASE_URL)
 
 
-def fetch_models(root: str, timeout: int = 6):
+# Why the last model-list read failed, in plain classes the UI
+# can act on: "billing" (402, the account needs credit), "auth"
+# (401/403, the key was rejected), "http" (any other status),
+# "network" (no answer at all), "shape" (an answer that is not
+# a model list). None after a success, and None when nothing
+# was read because the legacy provider is active. Master's
+# session, 2026-11-21: Gonka answered 402 and the UI could only
+# say "could not read", which reads like a Lexis bug; the class
+# is the difference between "fix the code" and "fund the
+# account".
+last_fetch_error = None
+
+
+def fetch_models(root: str, timeout: int = 10):
     """The model ids the ACTIVE provider serves, read from its
     OpenAI-compatible /models endpoint. Returns None for the
     legacy provider (its catalog is the built-in one) and None
     when the endpoint cannot be read, so callers keep their
-    current catalog instead of losing every model."""
+    current catalog instead of losing every model; the failure
+    class is left in last_fetch_error."""
+    global last_fetch_error
+    last_fetch_error = None
     active = active_provider(root)
     if active.get("legacy") or not active.get("base"):
         return None
@@ -197,12 +213,30 @@ def fetch_models(root: str, timeout: int = 6):
             headers={"Authorization": f"Bearer {current_key(root)}"},
             timeout=timeout,
         )
+    except Exception:
+        last_fetch_error = "network"
+        return None
+    status = getattr(resp, "status_code", 200)
+    if status == 402:
+        last_fetch_error = "billing"
+        return None
+    if status in (401, 403):
+        last_fetch_error = "auth"
+        return None
+    if status != 200:
+        last_fetch_error = "http"
+        return None
+    try:
         data = resp.json()
         ids = [m.get("id") for m in data.get("data", [])
                if isinstance(m, dict) and m.get("id")]
-        return ids or None
     except Exception:
+        last_fetch_error = "shape"
         return None
+    if not ids:
+        last_fetch_error = "shape"
+        return None
+    return ids
 
 
 # A stream that goes silent for this long is dead, not slow
