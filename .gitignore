@@ -27,3 +27,4 @@ lexis.exe
 # Runtime artifacts from local runs
 skills/
 providers.json
+visor_prefs.json
